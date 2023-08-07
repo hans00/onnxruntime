@@ -97,6 +97,9 @@ RUN  pip install \
      pytest-xdist \
      pytest-rerunfailures
 
+# Configure conda
+RUN conda install -c conda-forge gcc=12.1.0 -y
+
 ENV ORTMODULE_ONNX_OPSET_VERSION=15
 
 ARG BUILD_UID=1001
