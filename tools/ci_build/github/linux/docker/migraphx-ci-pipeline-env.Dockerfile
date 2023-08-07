@@ -4,11 +4,15 @@ FROM rocm/dev-ubuntu-22.04:${ROCM_VERSION}-complete
 
 # Upgrade to meet security requirements
 RUN apt-get update -y && apt-get upgrade -y && apt-get autoremove -y && \
-    apt-get install  -y cifs-utils wget half libnuma-dev lsb-release && \
+    apt-get install  -y locales cifs-utils wget half libnuma-dev lsb-release && \
     apt-get clean -y
 
 ENV DEBIAN_FRONTEND noninteractive
 ENV MIGRAPHX_DISABLE_FAST_GELU=1
+RUN locale-gen en_US.UTF-8
+RUN update-locale LANG=en_US.UTF-8
+ENV LC_ALL C.UTF-8
+ENV LANG C.UTF-8
 
 WORKDIR /stage
 
