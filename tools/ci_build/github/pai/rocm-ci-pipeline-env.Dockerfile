@@ -39,7 +39,7 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
 # Create rocm-ci environment
 ENV CONDA_ENVIRONMENT_PATH /opt/miniconda/envs/rocm-ci
 ENV CONDA_DEFAULT_ENV rocm-ci
-RUN conda create -y -p $CONDA_DEFAULT_ENV python=3.8
+RUN conda create -y -n $CONDA_DEFAULT_ENV python=3.8
 ENV PATH $CONDA_ENVIRONMENT_PATH/bin:${PATH}
 
 # Enable rocm-ci environment
