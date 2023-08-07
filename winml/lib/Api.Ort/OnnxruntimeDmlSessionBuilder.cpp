@@ -1,5 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
-// Licensed under the MIT License.
+ // Licensed under the MIT License.
 
 #include "lib/Api.Ort/pch.h"
 
@@ -34,15 +34,15 @@ OnnxruntimeDmlSessionBuilder::CreateSessionOptions(OrtSessionOptions** options) 
 
   auto session_options = UniqueOrtSessionOptions(ort_options, ort_api->ReleaseSessionOptions);
 
-  // set the graph optimization level to all (used to be called level 3)
+    // set the graph optimization level to all (used to be called level 3)
   RETURN_HR_IF_NOT_OK_MSG(
     ort_api->SetSessionGraphOptimizationLevel(session_options.get(), GraphOptimizationLevel::ORT_ENABLE_ALL), ort_api
   );
 
-  // Disable the mem pattern session option for DML. It will cause problems with how memory is allocated.
+    // Disable the mem pattern session option for DML. It will cause problems with how memory is allocated.
   RETURN_HR_IF_NOT_OK_MSG(ort_api->DisableMemPattern(session_options.get()), ort_api);
 
-  // Request the dml ep
+    // Request the dml ep
   RETURN_HR_IF_NOT_OK_MSG(
     winml_adapter_api->OrtSessionOptionsAppendExecutionProvider_DML(
       session_options.get(), device_.get(), queue_.get(), metacommands_enabled_
@@ -59,7 +59,7 @@ OnnxruntimeDmlSessionBuilder::CreateSessionOptions(OrtSessionOptions** options) 
     winml_adapter_api->OrtSessionOptionsAppendExecutionProvider_CPU(session_options.get(), use_arena), ort_api
   );
 
-  // call release() so the underlying OrtSessionOptions object isn't freed
+    // call release() so the underlying OrtSessionOptions object isn't freed
   *options = session_options.release();
 
   return S_OK;
@@ -104,7 +104,7 @@ HRESULT OnnxruntimeDmlSessionBuilder::Initialize(OrtSession* session) {
     winml_adapter_api->SessionGetExecutionProvider(session, 0, &ort_provider), engine_factory_->UseOrtApi()
   );
 
-  // Flush the D3D12 work from the DML execution provider
+    // Flush the D3D12 work from the DML execution provider
   RETURN_HR_IF_NOT_OK_MSG(
     winml_adapter_api->DmlExecutionProviderFlushContext(ort_provider), engine_factory_->UseOrtApi()
   );

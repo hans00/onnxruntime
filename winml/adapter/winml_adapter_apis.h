@@ -1,5 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
-// Licensed under the MIT License.
+ // Licensed under the MIT License.
 
 #pragma once
 
@@ -16,7 +16,7 @@ ORT_API(void, ReleaseExecutionProvider, OrtExecutionProvider*);
 
 ORT_API_STATUS(OverrideSchema);
 
-// OrtEnv methods
+  // OrtEnv methods
 ORT_API_STATUS(
   EnvConfigureCustomLoggerAndProfiler,
   _In_ OrtEnv* env,
@@ -28,7 +28,7 @@ ORT_API_STATUS(
   _Outptr_ OrtEnv** out
 );
 
-// OrtModel methods
+  // OrtModel methods
 ORT_API_STATUS(CreateModelFromPath, _In_ const char* model_path, _In_ size_t size, _Outptr_ OrtModel** out);
 ORT_API_STATUS(CreateModelFromData, _In_opt_ void* data, _In_ size_t size, _Outptr_ OrtModel** out);
 ORT_API_STATUS(CloneModel, _In_ const OrtModel* in, _Outptr_ OrtModel** out);
@@ -85,7 +85,7 @@ ORT_API_STATUS(
   bool metacommands_enabled
 );
 
-// OrtSession methods
+  // OrtSession methods
 ORT_API_STATUS(
   CreateSessionWithoutModel,
   _In_ OrtEnv* env,
@@ -95,7 +95,7 @@ ORT_API_STATUS(
   _Outptr_ OrtSession** session
 );
 
-//Do not release provider... as there is no release method available
+  //Do not release provider... as there is no release method available
 ORT_API_STATUS(
   SessionGetExecutionProvider, _In_ OrtSession* session, _In_ size_t index, _Out_ OrtExecutionProvider** provider
 );
@@ -121,11 +121,11 @@ ORT_API_STATUS(
   _Out_ winrt::Windows::Foundation::Collections::IMapView<winrt::hstring, uint32_t>& overrides
 );
 
-// Dml methods (TODO need to figure out how these need to move to session somehow...)
+  // Dml methods (TODO need to figure out how these need to move to session somehow...)
 ORT_API_STATUS(DmlExecutionProviderFlushContext, _In_ OrtExecutionProvider* dml_provider);
 ORT_API_STATUS(DmlExecutionProviderReleaseCompletedReferences, _In_ OrtExecutionProvider* dml_provider);
 
-// note: this returns a weak ref
+  // note: this returns a weak ref
 
 ORT_API_STATUS(GetProviderMemoryInfo, _In_ OrtExecutionProvider* provider, OrtMemoryInfo** memory_info);
 ORT_API_STATUS(
@@ -133,7 +133,7 @@ ORT_API_STATUS(
 );
 ORT_API_STATUS(FreeProviderAllocator, _In_ OrtAllocator* allocator);
 
-// ExecutionProvider Methods
+  // ExecutionProvider Methods
 ORT_API_STATUS(ExecutionProviderSync, _In_ OrtExecutionProvider* provider);
 ORT_API_STATUS(DmlCopyTensor, _In_ OrtExecutionProvider* provider, _In_ OrtValue* src, _In_ OrtValue* dst);
 ORT_API_STATUS(CreateCustomRegistry, _Out_ IMLOperatorRegistry** registry);
@@ -143,7 +143,7 @@ ORT_API_STATUS(
   SessionGetInputRequiredDeviceId, _In_ OrtSession* session, _In_ const char* const input_name, _Out_ int16_t* device_id
 );
 
-// Model Building
+  // Model Building
 ORT_API_STATUS(
   CreateTensorTypeInfo,
   _In_ const int64_t* shape,
@@ -230,8 +230,8 @@ ORT_API_STATUS(
   CreateThreadPool, _In_ ThreadPoolType type, _In_ OrtThreadPoolOptions* params, _Outptr_ OrtThreadPool** out
 );
 
-// maps and sequences???
-//ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange().Map().at(ONNX_NAMESPACE::ONNX_DOMAIN).second
+  // maps and sequences???
+ //ONNX_NAMESPACE::OpSchemaRegistry::DomainToVersionRange().Map().at(ONNX_NAMESPACE::ONNX_DOMAIN).second
 
 }  // namespace Adapter
 }  // namespace MachineLearning

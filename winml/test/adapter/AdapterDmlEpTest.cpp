@@ -1,5 +1,5 @@
 // // Copyright (c) Microsoft Corporation. All rights reserved.
-// // Licensed under the MIT License.
+ // // Licensed under the MIT License.
 
 #include "testPch.h"
 
@@ -186,7 +186,7 @@ void DmlGetD3D12ResourceFromAllocation() {
     ort_dml_api->GetD3D12ResourceFromAllocation(allocator.get(), gpu_allocation, d3d12_resource_from_allocation.put()),
     ort_api
   );
-  // Ensure resource is the same
+   // Ensure resource is the same
   WINML_EXPECT_EQUAL(d3d12_resource, d3d12_resource_from_allocation);
 
   THROW_IF_NOT_OK_MSG(ort_dml_api->FreeGPUAllocation(gpu_allocation), ort_api);
@@ -261,7 +261,7 @@ void DmlCopyTensor() {
   OrtExecutionProvider* dml_provider;
   THROW_IF_NOT_OK_MSG(winml_adapter_api->SessionGetExecutionProvider(session.get(), 0, &dml_provider), ort_api);
 
-  // CPU to CPU is not supported
+    // CPU to CPU is not supported
   OrtMemoryInfo* cpu_memory_info;
   THROW_IF_NOT_OK_MSG(ort_api->CreateCpuMemoryInfo(OrtDeviceAllocator, OrtMemTypeDefault, &cpu_memory_info), ort_api);
   auto cpu_tensor = CreateTensorFromMemoryInfo(cpu_memory_info);
@@ -270,7 +270,7 @@ void DmlCopyTensor() {
     nullptr, winml_adapter_api->DmlCopyTensor(dml_provider, cpu_tensor.get(), dst_cpu_tensor.get())
   );
 
-  // GPU to CPU
+    // GPU to CPU
   OrtMemoryInfo* ort_memory_info;
   THROW_IF_NOT_OK_MSG(
     ort_api->CreateMemoryInfo(
