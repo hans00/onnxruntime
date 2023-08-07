@@ -79,6 +79,7 @@ RUN git clone https://github.com/microsoft/huggingface-transformers.git &&\
     pip install -e .
 
 RUN  pip install \
+     flatbuffers==2.0 \
      numpy==1.24.1 \
      onnx \
      cerberus \
@@ -97,8 +98,7 @@ RUN  pip install \
      pytest-xdist \
      pytest-rerunfailures
 
-# Configure conda
-RUN conda install -c conda-forge gcc=12.1.0 -y
+ENV LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu/:$LD_LIBRARY_PATH
 
 ENV ORTMODULE_ONNX_OPSET_VERSION=15
 
