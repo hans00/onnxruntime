@@ -19,8 +19,8 @@ WORKDIR /stage
 # Cmake
 ENV CMAKE_VERSION=3.26.3
 RUN cd /usr/local && \
-    wget -q -O - https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz | tar zxf - && \
-    cp -r /usr/local/cmake-${CMAKE_VERSION}-linux-x86_64/bin/. /usr/bin
+    wget -q https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz && \
+    tar -zxf /usr/local/cmake-3.26.3-Linux-x86_64.tar.gz --strip=1 -C /usr
 
 # ccache
 RUN mkdir -p /tmp/ccache && \
