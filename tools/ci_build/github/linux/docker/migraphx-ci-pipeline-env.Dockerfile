@@ -16,6 +16,19 @@ ENV LANG C.UTF-8
 
 WORKDIR /stage
 
+# Cmake
+ENV CMAKE_VERSION=3.26.3
+RUN cd /usr/local && \
+    wget -q -O - https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz | tar zxf -
+ENV PATH=/usr/local/cmake-${CMAKE_VERSION}-linux-x86_64/bin:${PATH}
+
+# ccache
+RUN mkdir -p /tmp/ccache && \
+    cd /tmp/ccache && \
+    wget -q -O - https://github.com/ccache/ccache/releases/download/v4.7.4/ccache-4.7.4-linux-x86_64.tar.xz | tar --strip 1 -J -xf - && \
+    cp /tmp/ccache/ccache /usr/bin && \
+    rm -rf /tmp/ccache
+
 # Install Conda
 ENV PATH /opt/miniconda/bin:${PATH}
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh --no-check-certificate && /bin/bash ~/miniconda.sh -b -p /opt/miniconda && \
@@ -36,17 +49,7 @@ ENV PATH $CONDA_ENVIRONMENT_PATH/bin:${PATH}
 # Enable migraphx-ci environment
 SHELL ["conda", "run", "-n", "migraphx-ci", "/bin/bash", "-c"]
 
-ADD scripts /tmp/scripts
-RUN /tmp/scripts/install_os_deps.sh
-
 # Install migraphx
 RUN apt update && apt install -y migraphx
-
-# ccache
-RUN mkdir -p /tmp/ccache && \
-    cd /tmp/ccache && \
-    wget -q -O - https://github.com/ccache/ccache/releases/download/v4.7.4/ccache-4.7.4-linux-x86_64.tar.xz | tar --strip 1 -J -xf - && \
-    cp /tmp/ccache/ccache /usr/bin && \
-    rm -rf /tmp/ccache
 
 RUN pip install numpy packaging
