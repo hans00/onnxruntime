@@ -99,6 +99,7 @@ RUN  pip install \
      scikit-learn \
      tokenizers \
      sentencepiece \
+     wget \
      dill==0.3.4 \
      pytorch_lightning==1.6.0 \
      pytest-xdist \
