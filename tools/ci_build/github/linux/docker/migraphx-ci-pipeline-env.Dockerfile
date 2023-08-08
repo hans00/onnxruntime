@@ -19,8 +19,8 @@ WORKDIR /stage
 # Cmake
 ENV CMAKE_VERSION=3.26.3
 RUN cd /usr/local && \
-    wget -q -O - https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz | tar zxf -
-ENV PATH=/usr/local/cmake-${CMAKE_VERSION}-linux-x86_64/bin:${PATH}
+    wget -q -O - https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz | tar zxf - && \
+    cp /usr/local/cmake-${CMAKE_VERSION}-linux-x86_64/bin/. /usr/bin
 
 # ccache
 RUN mkdir -p /tmp/ccache && \
@@ -43,8 +43,8 @@ RUN pip install cryptography==41.0.0
 # Create migraphx-ci environment
 ENV CONDA_ENVIRONMENT_PATH /opt/miniconda/envs/migraphx-ci
 ENV CONDA_DEFAULT_ENV migraphx-ci
-RUN conda create -y -n $CONDA_DEFAULT_ENV python=3.8
-ENV PATH $CONDA_ENVIRONMENT_PATH/bin:${PATH}
+RUN conda create -y -n ${CONDA_DEFAULT_ENV} python=3.8
+ENV PATH ${CONDA_ENVIRONMENT_PATH}/bin:${PATH}
 
 # Enable migraphx-ci environment
 SHELL ["conda", "run", "-n", "migraphx-ci", "/bin/bash", "-c"]
