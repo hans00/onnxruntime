@@ -13,6 +13,15 @@
 
 Napi::FunctionReference InferenceSessionWrap::constructor;
 
+const std::string LogLevelMap[] = {"VERBOSE", "INFO", "WARNING", "ERROR", "FATAL"};
+
+void ConsoleLog(void *param, OrtLoggingLevel severity, const char *category, const char *logid,
+                const char *code_location, const char *message) {
+  auto consoleLog = reinterpret_cast<Napi::FunctionReference *>(param);
+  std::string logMessage = "[" + LogLevelMap[severity] + "][" + category + "] " + code_location + ": " + message;
+  consoleLog->Call({Napi::String::New(consoleLog->Env(), logMessage)});
+}
+
 Napi::Object InferenceSessionWrap::Init(Napi::Env env, Napi::Object exports) {
 #if defined(USE_DML) && defined(_WIN32)
   LoadDirectMLDll(env);
@@ -23,7 +32,9 @@ Napi::Object InferenceSessionWrap::Init(Napi::Env env, Napi::Object exports) {
       Ort::Global<void>::api_ == nullptr, env,
       "Failed to initialize ONNX Runtime API. It could happen when this nodejs binding was built with a higher version "
       "ONNX Runtime but now runs with a lower version ONNX Runtime DLL(or shared library).");
-  auto ortEnv = new Ort::Env{ORT_LOGGING_LEVEL_WARNING, "onnxruntime-node"};
+  auto consoleLog = new Napi::FunctionReference(
+      Napi::Persistent(env.Global().Get("console").As<Napi::Object>().Get("log").As<Napi::Function>()));
+  auto ortEnv = new Ort::Env{ORT_LOGGING_LEVEL_WARNING, "onnxruntime-node", ConsoleLog, consoleLog};
   env.SetInstanceData(ortEnv);
   // initialize binding
   Napi::HandleScope scope(env);
