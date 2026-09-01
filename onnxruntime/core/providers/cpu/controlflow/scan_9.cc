@@ -21,7 +21,7 @@
 #include "core/providers/cpu/tensor/utils.h"
 #include "core/providers/cpu/tensor/transpose.h"
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -524,11 +524,51 @@ ONNX_CPU_OPERATOR_VERSIONED_KERNEL(Scan,
                                    Scan<9>);
 
 // Opset 19 starts to support float 8 types for the type constraint "V"
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(Scan,
+                                   19, 20,
+                                   KernelDefBuilder()
+                                       // 'I' is in the ONNX spec but is not actually used for any inputs or outputs
+                                       // .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                                       .TypeConstraint("V", DataTypeImpl::AllTensorTypesIRv9()),
+                                   Scan<9>);
+
+// Opset 21 starts to support 4-bit int types for the type constraint "V"
+// TODO(adrianlizarraga): Implement int4 and uint4 support.
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(Scan,
+                                   21,
+                                   22,
+                                   KernelDefBuilder()
+                                       // 'I' is in the ONNX spec but is not actually used for any inputs or outputs
+                                       // .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                                       .TypeConstraint("V", DataTypeImpl::AllTensorTypesIRv9()),
+                                   Scan<9>);
+
+// Opset 23 added support for float4e2m1.
+// TODO: Add support for float4e2m1.
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(Scan,
+                                   23,
+                                   23,
+                                   KernelDefBuilder()
+                                       // 'I' is in the ONNX spec but is not actually used for any inputs or outputs
+                                       // .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                                       .TypeConstraint("V", DataTypeImpl::AllTensorTypesIRv9()),
+                                   Scan<9>);
+
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(Scan,
+                                   24,
+                                   24,
+                                   KernelDefBuilder()
+                                       // 'I' is in the ONNX spec but is not actually used for any inputs or outputs
+                                       // .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                                       .TypeConstraint("V", DataTypeImpl::AllTensorTypesIRv9()),
+                                   Scan<9>);
+
+// Opset 25
 ONNX_CPU_OPERATOR_KERNEL(Scan,
-                         19,
+                         25,
                          KernelDefBuilder()
                              // 'I' is in the ONNX spec but is not actually used for any inputs or outputs
-                             //.TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                             // .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
                              .TypeConstraint("V", DataTypeImpl::AllTensorTypesIRv9()),
                          Scan<9>);
 }  // namespace onnxruntime

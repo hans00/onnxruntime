@@ -157,6 +157,29 @@ TEST(ScatterNDOpTest, ScatterND_sliced_index_string_int64) {
   test.Run();
 }
 
+TEST(ScatterNDOpTest, ScatterND_string_duplicate_indices) {
+  OpTester test("ScatterND", 18);
+  test.AddInput<std::string>("data", {2}, {"original", "untouched"});
+  test.AddInput<int64_t>("indices", {3, 1}, {0, 0, 0});
+  test.AddInput<std::string>("updates", {3},
+                             {"first value longer than the small string optimization",
+                              "second value longer than the small string optimization",
+                              "last value longer than the small string optimization"});
+  test.AddOutput<std::string>("output", {2},
+                              {"last value longer than the small string optimization", "untouched"});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kOpenVINOExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_string_add_duplicate_indices) {
+  OpTester test("ScatterND", 18);
+  test.AddAttribute("reduction", "add");
+  test.AddInput<std::string>("data", {2}, {"base", "untouched"});
+  test.AddInput<int64_t>("indices", {3, 1}, {0, 0, 0});
+  test.AddInput<std::string>("updates", {3}, {"-first", "-second", "-last"});
+  test.AddOutput<std::string>("output", {2}, {"base-first-second-last", "untouched"});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kOpenVINOExecutionProvider});
+}
+
 TEST(ScatterNDOpTest, ScatterND_batched_3tensor_int64) {
   OpTester test1("ScatterND", 11);
   test1.AddInput<uint32_t>("data", {2, 2, 2}, {0, 0, 0, 0, 0, 0, 0, 0});
@@ -178,6 +201,103 @@ TEST(ScatterNDOpTest, ScatterND_batched_3tensor_int64) {
   test3.AddInput<int64_t>("updates", {2, 1, 2, 2}, {4LL, 5LL, 6LL, 7LL, 0LL, 1LL, 2LL, 3LL});
   test3.AddOutput<int64_t>("output", {2, 2, 2}, {0LL, 1LL, 2LL, 3LL, 4LL, 5LL, 6LL, 7LL});
   test3.Run();
+}
+
+TEST(ScatterNDOpTest, ScatterND_18_add) {
+  OpTester test1("ScatterND", 18);
+  test1.AddAttribute("reduction", "add");
+  test1.AddInput<float>("data", {2, 2, 3}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.AddInput<int64_t>("indices", {3, 1}, {0, 1, 0});
+  // The linter complains if the line is split into multiple lines.
+  test1.AddInput<float>("updates", {3, 2, 3}, {2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f, 65536.0f, 131072.0f, 262144.0f});
+  test1.AddOutput<float>("output", {2, 2, 3}, {8194.1f, 16388.1f, 32776.10f, 65552.10f, 131104.1f, 262208.1f, 128.1f, 256.1f, 512.1f, 1024.1f, 2048.1f, 4096.1f});
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_18_mul) {
+  OpTester test1("ScatterND", 18);
+  test1.AddAttribute("reduction", "mul");
+  test1.AddInput<float>("data", {2, 2, 3}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.AddInput<int64_t>("indices", {3, 1}, {0, 1, 0});
+  // The linter complains if the line is split into multiple lines.
+  test1.AddInput<float>("updates", {3, 2, 3}, {2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f, 65536.0f, 131072.0f, 262144.0f});
+  test1.AddOutput<float>("output", {2, 2, 3}, {1638.4f, 6553.6f, 26214.4f, 104857.6f, 419430.4f, 1677721.625f, 12.8f, 25.6f, 51.2f, 102.4f, 204.8f, 409.6f});
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_18_mul_long_shape) {
+  OpTester test1("ScatterND", 18);
+  test1.AddAttribute("reduction", "mul");
+  test1.AddInput<float>("data", {2, 2, 3, 1, 1, 1, 1}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.AddInput<int64_t>("indices", {3, 1}, {0, 1, 0});
+  // The linter complains if the line is split into multiple lines.
+  test1.AddInput<float>("updates", {3, 2, 3, 1, 1, 1, 1}, {2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f, 65536.0f, 131072.0f, 262144.0f});
+  test1.AddOutput<float>("output", {2, 2, 3, 1, 1, 1, 1}, {1638.4f, 6553.6f, 26214.4f, 104857.6f, 419430.4f, 1677721.625f, 12.8f, 25.6f, 51.2f, 102.4f, 204.8f, 409.6f});
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_18_min) {
+  OpTester test1("ScatterND", 18);
+  test1.AddAttribute("reduction", "min");
+  test1.AddInput<float>("data", {2, 2, 3}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.AddInput<int64_t>("indices", {3, 1}, {0, 1, 0});
+  // The linter complains if the line is split into multiple lines.
+  test1.AddInput<float>("updates", {3, 2, 3}, {2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f, 65536.0f, 131072.0f, 262144.0f});
+  test1.AddOutput<float>("output", {2, 2, 3}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_18_max) {
+  OpTester test1("ScatterND", 18);
+  test1.AddAttribute("reduction", "max");
+  test1.AddInput<float>("data", {2, 2, 3}, {0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f, 0.1f});
+  test1.AddInput<int64_t>("indices", {3, 1}, {0, 1, 0});
+  // The linter complains if the line is split into multiple lines.
+  test1.AddInput<float>("updates", {3, 2, 3}, {2.0f, 4.0f, 8.0f, 16.0f, 32.0f, 64.0f, 128.0f, 256.0f, 512.0f, 1024.0f, 2048.0f, 4096.0f, 8192.0f, 16384.0f, 32768.0f, 65536.0f, 131072.0f, 262144.0f});
+  test1.AddOutput<float>("output", {2, 2, 3}, {8192.0, 16384.0, 32768.0, 65536.0, 131072.0, 262144.0, 128.0, 256.0, 512.0, 1024.0, 2048.0, 4096.0});
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+}
+
+// Test for ScatterND with empty indices - output should be same as input
+TEST(ScatterNDOpTest, ScatterND_empty_indices) {
+  // Test with float data type and minimal empty case
+  OpTester test1("ScatterND", 11);
+  test1.AddInput<float>("data", {2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+  test1.AddInput<int64_t>("indices", {0, 1}, {});                                  // Empty indices tensor - no indices to process
+  test1.AddInput<float>("updates", {0, 3}, {});                                    // Empty updates tensor
+  test1.AddOutput<float>("output", {2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});  // Same as input
+  test1.Run(OpTester::ExpectResult::kExpectSuccess, "", {kDmlExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_zero_index_depth_updates_entire_tensor) {
+  OpTester test("ScatterND", 18);
+  test.AddInput<float>("data", {2, 3}, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+  test.AddInput<int64_t>("indices", {1, 0}, {});
+  test.AddInput<float>("updates", {1, 2, 3}, {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f});
+  test.AddOutput<float>("output", {2, 3}, {10.0f, 20.0f, 30.0f, 40.0f, 50.0f, 60.0f});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "",
+           {kTensorrtExecutionProvider, kWebGpuExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_zero_index_depth_adds_multiple_updates) {
+  OpTester test("ScatterND", 18);
+  test.AddAttribute("reduction", "add");
+  test.AddInput<float>("data", {2}, {1.0f, 2.0f});
+  test.AddInput<int64_t>("indices", {2, 0}, {});
+  test.AddInput<float>("updates", {2, 2}, {10.0f, 20.0f, 100.0f, 200.0f});
+  test.AddOutput<float>("output", {2}, {111.0f, 222.0f});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "",
+           {kTensorrtExecutionProvider, kWebGpuExecutionProvider});
+}
+
+TEST(ScatterNDOpTest, ScatterND_zero_index_depth_empty_data) {
+  OpTester test("ScatterND", 18);
+  test.AddInput<float>("data", {0, 3}, {});
+  test.AddInput<int64_t>("indices", {1, 0}, {});
+  test.AddInput<float>("updates", {1, 0, 3}, {});
+  test.AddOutput<float>("output", {0, 3}, {});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "",
+           {kTensorrtExecutionProvider, kWebGpuExecutionProvider});
 }
 
 }  // namespace test

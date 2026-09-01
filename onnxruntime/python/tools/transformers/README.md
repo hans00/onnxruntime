@@ -29,13 +29,13 @@ Models not in the list may only be partially optimized or not optimized at all.
 - **hidden_size**: (*default: 768*)
     BERT-base and BERT-large has 768 and 1024 hidden nodes respectively.
 - **input_int32**: (*optional*)
-    Exported model ususally uses int64 tensor as input. If this flag is specified, int32 tensors will be used as input, and it could avoid un-necessary Cast nodes and get better performance.
+    Exported model usually uses int64 tensor as input. If this flag is specified, int32 tensors will be used as input, and it could avoid un-necessary Cast nodes and get better performance.
 - **float16**: (*optional*)
     By default, model uses float32 in computation. If this flag is specified, half-precision float will be used. This option is recommended for NVidia GPU with Tensor Core like V100 and T4. For older GPUs, float32 is likely faster.
 -  **use_gpu**: (*optional*)
     When opt_level > 1, please set this flag for GPU inference.
 - **opt_level**: (*optional*)
-    Set a proper graph optimization level of OnnxRuntime: 0 - disable all (default), 1 - basic, 2 - extended, 99 - all. If the value is positive, OnnxRuntime will be used to optimize graph first.
+    Set a proper graph optimization level of OnnxRuntime: 0 - disable all (default), 1 - basic, 2 - extended, 3 - layout, 99 - all. If the value is positive, OnnxRuntime will be used to optimize graph first.
 - **verbose**: (*optional*)
     Print verbose information when this flag is specified.
 
@@ -84,4 +84,3 @@ Since past state is used, sequence length in input_ids is 1. For example, s=4 me
 python -m onnxruntime.transformers.models.gpt2.benchmark_gpt2 --use_gpu -m gpt2 -o -v -b 1 8 32 128 -s 4 8 32 128 -p fp32
 python -m onnxruntime.transformers.models.gpt2.benchmark_gpt2 --use_gpu -m gpt2 -o -v -b 1 8 32 128 -s 4 8 32 128 -p fp16
 ```
-

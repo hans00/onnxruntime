@@ -39,6 +39,12 @@ using FuseCheckerFn = std::function<const NodeUnit*(
     const GraphViewer& graph,
     const std::unordered_map<const Node*, const NodeUnit*>& supported_node_unit_map)>;
 
+bool HasOnlyActivationConsumer(const Node& producer, const Node& activation, const GraphViewer& graph) {
+  return !graph.NodeProducesGraphOutput(producer) &&
+         producer.GetOutputEdgesCount() == 1 &&
+         producer.OutputEdgesBegin()->GetNode().Index() == activation.Index();
+}
+
 const NodeUnit* ClipReluChecker(const NodeUnit& node_unit,
                                 const GraphViewer& graph,
                                 const std::unordered_map<const Node*, const NodeUnit*>& supported_node_unit_map) {
@@ -58,6 +64,10 @@ const NodeUnit* ClipReluChecker(const NodeUnit& node_unit,
         input0.Domain() != kMSInternalNHWCDomain ||
         (node_to_be_fuse.count(input0.OpType()) == 0) ||
         supported_node_unit_map.at(&input0)->UnitType() == NodeUnit::Type::QDQGroup) {
+      break;
+    }
+
+    if (!HasOnlyActivationConsumer(input0, node, graph)) {
       break;
     }
 
@@ -90,6 +100,17 @@ const NodeUnit* ClipReluChecker(const NodeUnit& node_unit,
 }  // namespace
 
 bool NodeSupportChecker::IsNodeSupported(const NodeUnit& nodeunit) {
+#ifndef XNNPACK_FP16_SUPPORTED
+  // check whether the hardware support XNNPack FP16
+  // Note. In CI, ios pipeline on ADO doesn't support XNNPack FP16. Because ADO mac pool is still x64.
+  const auto& inputs = nodeunit.Inputs();
+  const auto& x_arg = inputs[0].node_arg;
+  const auto* x_type = x_arg.TypeAsProto();
+  if (x_type == nullptr || x_type->tensor_type().elem_type() == ONNX_NAMESPACE::TensorProto_DataType_FLOAT16) {
+    return false;
+  }
+#endif
+
   static std::unordered_map<std::string, CheckerFn> checkers{
       {"Conv", Conv::IsOnnxNodeSupported},
       {"ConvTranspose", ConvTranspose::IsOnnxNodeSupported},

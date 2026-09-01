@@ -16,7 +16,6 @@
 
 #ifdef ETW_TRACE_LOGGING_SUPPORTED
 
-#include <date/date.h>
 #include <atomic>
 #include <iostream>
 #include <string>
@@ -24,14 +23,14 @@
 
 #include "core/common/logging/capture.h"
 #include "core/common/logging/isink.h"
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 
 namespace onnxruntime {
 namespace logging {
 
 class EtwSink : public ISink {
  public:
-  EtwSink() = default;
+  EtwSink() : ISink(SinkType::EtwSink) {}
   ~EtwSink() = default;
 
   constexpr static const char* kEventName = "ONNXRuntimeLogEvent";
@@ -47,6 +46,11 @@ class EtwSink : public ISink {
 };
 
 class EtwRegistrationManager {
+  enum class InitializationStatus { NotInitialized,
+                                    Initializing,
+                                    Initialized,
+                                    Failed };
+
  public:
   using EtwInternalCallback = std::function<void(LPCGUID SourceId, ULONG IsEnabled, UCHAR Level,
                                                  ULONGLONG MatchAnyKeyword, ULONGLONG MatchAllKeyword,
@@ -54,6 +58,9 @@ class EtwRegistrationManager {
 
   // Singleton instance access
   static EtwRegistrationManager& Instance();
+
+  // Returns true if ETW is supported at all.
+  static bool SupportsETW();
 
   // Check if ETW logging is enabled
   bool IsEnabled() const;
@@ -70,6 +77,8 @@ class EtwRegistrationManager {
   HRESULT Status() const;
 
   void RegisterInternalCallback(const EtwInternalCallback& callback);
+
+  void UnregisterInternalCallback(const EtwInternalCallback& callback);
 
  private:
   EtwRegistrationManager();
@@ -90,11 +99,11 @@ class EtwRegistrationManager {
       _In_opt_ PEVENT_FILTER_DESCRIPTOR FilterData,
       _In_opt_ PVOID CallbackContext);
 
-  std::vector<EtwInternalCallback> callbacks_;
-  OrtMutex callbacks_mutex_;
-  mutable OrtMutex provider_change_mutex_;
-  OrtMutex init_mutex_;
-  bool initialized_ = false;
+  std::vector<const EtwInternalCallback*> callbacks_;
+  std::mutex callbacks_mutex_;
+  mutable std::mutex provider_change_mutex_;
+  std::mutex init_mutex_;
+  InitializationStatus initialization_status_ = InitializationStatus::NotInitialized;
   bool is_enabled_;
   UCHAR level_;
   ULONGLONG keyword_;
@@ -103,5 +112,33 @@ class EtwRegistrationManager {
 
 }  // namespace logging
 }  // namespace onnxruntime
+#else
+// ETW is not supported on this platform but should still define a dummy EtwRegistrationManager
+// so that it can be used in the EP provider bridge.
+#include "core/common/logging/severity.h"
 
+namespace onnxruntime {
+namespace logging {
+class EtwRegistrationManager {
+ public:
+  using EtwInternalCallback = std::function<void(LPCGUID SourceId, ULONG IsEnabled, UCHAR Level,
+                                                 ULONGLONG MatchAnyKeyword, ULONGLONG MatchAllKeyword,
+                                                 PEVENT_FILTER_DESCRIPTOR FilterData, PVOID CallbackContext)>;
+
+  static EtwRegistrationManager& Instance();
+  static bool SupportsETW();
+  bool IsEnabled() const { return false; }
+  UCHAR Level() const { return 0; }
+  Severity MapLevelToSeverity() { return Severity::kFATAL; }
+  uint64_t Keyword() const { return 0; }
+  HRESULT Status() const { return 0; }
+  void RegisterInternalCallback(const EtwInternalCallback& callback) {}
+  void UnregisterInternalCallback(const EtwInternalCallback& callback) {}
+
+ private:
+  EtwRegistrationManager() = default;
+  ~EtwRegistrationManager() = default;
+};
+}  // namespace logging
+}  // namespace onnxruntime
 #endif  // ETW_TRACE_LOGGING_SUPPORTED

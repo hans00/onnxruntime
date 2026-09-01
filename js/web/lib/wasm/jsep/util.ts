@@ -10,11 +10,10 @@ export class MatMulUtil {
    * @param b The shape of tensor B. Should be a tuple of 2 positive integers
    * @returns The expected shape of the result, or undefined if N/A
    */
-  static calcMatMulShape(a: [number, number], b: [number, number]): [number, number]|undefined {
-    return (a[1] !== b[0]) ? undefined : [a[0], b[1]];
+  static calcMatMulShape(a: [number, number], b: [number, number]): [number, number] | undefined {
+    return a[1] !== b[0] ? undefined : [a[0], b[1]];
   }
 }
-
 
 export class BroadcastUtil {
   /**
@@ -24,7 +23,11 @@ export class BroadcastUtil {
    * @param isMatMul Whether the operation is MatMul
    * @returns The expected shape of the result, or undefined if N/A
    */
-  static calcShape(adims: readonly number[], bdims: readonly number[], isMatMul = false): readonly number[]|undefined {
+  static calcShape(
+    adims: readonly number[],
+    bdims: readonly number[],
+    isMatMul = false,
+  ): readonly number[] | undefined {
     const arank = adims.length;
     const brank = bdims.length;
     if (arank === 0) {
@@ -41,8 +44,10 @@ export class BroadcastUtil {
       if (arank < 2 || brank < 2) {
         return undefined;
       }
-      const cShapeMatMul =
-          MatMulUtil.calcMatMulShape([adims[arank - 2], adims[arank - 1]], [bdims[brank - 2], bdims[brank - 1]]);
+      const cShapeMatMul = MatMulUtil.calcMatMulShape(
+        [adims[arank - 2], adims[arank - 1]],
+        [bdims[brank - 2], bdims[brank - 1]],
+      );
       if (cShapeMatMul === undefined) {
         return undefined;
       }
@@ -91,7 +96,6 @@ export class BroadcastUtil {
     return true;
   }
 }
-
 
 export class ShapeUtil {
   /**
@@ -159,10 +163,10 @@ export class ShapeUtil {
       // size cannot be negative.
       if (dims[i] < 0) {
         throw new Error(
-            // eslint-disable-next-line max-len
-            'cannot get valid size from specified dimension range. Most likely the range contains negative values in them.');
+          'cannot get valid size from specified dimension range. Most likely the range contains negative values in them.',
+        );
       }
-      size *= dims[i];
+      size *= Number(dims[i]);
     }
     return size;
   }
@@ -184,7 +188,7 @@ export class ShapeUtil {
   }
 
   /**
-   * normailze axis of range [-r, r) into [0, r).
+   * normalize axis of range [-r, r) into [0, r).
    */
   static normalizeAxis(axis: number, tensorRank: number): number {
     if (axis < -tensorRank && axis >= tensorRank) {
@@ -194,7 +198,7 @@ export class ShapeUtil {
   }
 
   static normalizeAxes(axes: readonly number[], tensorRank?: number): number[] {
-    return axes.map(x => this.normalizeAxis(x, tensorRank ?? axes.length));
+    return axes.map((x) => this.normalizeAxis(x, tensorRank ?? axes.length));
   }
 
   /**
@@ -245,8 +249,13 @@ export class PoolConvUtil {
    * @param pads Padding for the beginning and ending along each axis.
    */
   static adjustPoolAttributes(
-      isGlobalOperator: boolean, inputDims: readonly number[], kernelShape: number[], strides: number[],
-      dilations: number[], pads: number[]): void {
+    isGlobalOperator: boolean,
+    inputDims: readonly number[],
+    kernelShape: number[],
+    strides: number[],
+    dilations: number[],
+    pads: number[],
+  ): void {
     if (!isGlobalOperator && kernelShape.length !== inputDims.length - 2) {
       throw new Error('length of specified kernel shapes should be 2 less than length of input dimensions');
     }
@@ -309,8 +318,14 @@ export class PoolConvUtil {
 
   // adjust pad values based on 'autoPad' attribute
   static adjustPadsBasedOnAutoPad(
-      inputDims: readonly number[], strides: readonly number[], dilations: readonly number[],
-      kernelShape: readonly number[], pads: number[], isChannelLast: boolean, autoPad?: string): void {
+    inputDims: readonly number[],
+    strides: readonly number[],
+    dilations: readonly number[],
+    kernelShape: readonly number[],
+    pads: number[],
+    isChannelLast: boolean,
+    autoPad?: string,
+  ): void {
     if (!autoPad) {
       return;
     }
@@ -319,18 +334,25 @@ export class PoolConvUtil {
       throw new Error('length of pads should be twice the length of data dimensions');
     }
 
-    if (strides.length !== (inputDims.length - 2)) {
+    if (strides.length !== inputDims.length - 2) {
       throw new Error('length of strides should be the length of data dimensions');
     }
 
-    if (kernelShape.length !== (inputDims.length - 2)) {
+    if (kernelShape.length !== inputDims.length - 2) {
       throw new Error('length of kernel shapes should be the length of data dimensions');
     }
 
     for (let dim = 0; dim < inputDims.length - 2; dim++) {
       PoolConvUtil.adjustPadAndReturnShape(
-          inputDims[dim + (isChannelLast ? 1 : 2)], strides[dim], dilations[dim], kernelShape[dim], pads, dim,
-          dim + inputDims.length - 2, autoPad);
+        inputDims[dim + (isChannelLast ? 1 : 2)],
+        strides[dim],
+        dilations[dim],
+        kernelShape[dim],
+        pads,
+        dim,
+        dim + inputDims.length - 2,
+        autoPad,
+      );
     }
   }
 
@@ -344,10 +366,19 @@ export class PoolConvUtil {
    * @param pads Padding for the beginning and ending along each axis.
    * @param autoPad DEPRECATED attribute supported for legacy models. Specifies how to implicitly calculate pads in each
    *     dimension. Can take values NOTSET, SAME_UPPER, SAME_LOWER, or VALID.
+   * @param ceilMode When set to 1, use ceil() instead of floor() to compute the output spatial size (and apply the
+   *     "shrink the last window if it starts entirely in padding" rule). Defaults to 0 (floor).
    */
   static computePoolOutputShape(
-      isGlobalOperator: boolean, inputDims: readonly number[], strides: number[], dilations: number[],
-      kernelShape: number[], pads: number[], autoPad?: string): number[] {
+    isGlobalOperator: boolean,
+    inputDims: readonly number[],
+    strides: number[],
+    dilations: number[],
+    kernelShape: number[],
+    pads: number[],
+    autoPad?: string,
+    ceilMode = 0,
+  ): number[] {
     if (inputDims.length <= 0) {
       throw new Error('input shape must be of size greater than 0');
     }
@@ -356,7 +387,16 @@ export class PoolConvUtil {
     const outputDims = [inputDims[0], inputDims[1]];
 
     PoolConvUtil.computeShapeHelper(
-        isGlobalOperator, inputDims, outputDims, strides, dilations, kernelShape, pads, autoPad);
+      isGlobalOperator,
+      inputDims,
+      outputDims,
+      strides,
+      dilations,
+      kernelShape,
+      pads,
+      autoPad,
+      ceilMode,
+    );
     return outputDims;
   }
 
@@ -371,8 +411,14 @@ export class PoolConvUtil {
    *     dimension. Can take values NOTSET, SAME_UPPER, SAME_LOWER, or VALID.
    */
   static computeConvOutputShape(
-      inputDims: readonly number[], filterDims: readonly number[], strides: number[], dilations: number[],
-      kernelShape: number[], pads: number[], autoPad?: string): number[] {
+    inputDims: readonly number[],
+    filterDims: readonly number[],
+    strides: number[],
+    dilations: number[],
+    kernelShape: number[],
+    pads: number[],
+    autoPad?: string,
+  ): number[] {
     if (inputDims.length <= 0 || filterDims.length <= 0) {
       throw new Error('invalid input tensor dims or invalid filter tensor dims');
     }
@@ -388,50 +434,116 @@ export class PoolConvUtil {
   // called by computePoolOutputShape() and computeConvOutputShape()
   // adjust pads based on 'autoPad' attribute prior to shape computation
   private static computeShapeHelper(
-      isGlobalOperator: boolean, inputDims: readonly number[], outputDims: number[], strides: readonly number[],
-      dilations: readonly number[], kernelShape: readonly number[], pads: number[], autoPad?: string) {
+    isGlobalOperator: boolean,
+    inputDims: readonly number[],
+    outputDims: number[],
+    strides: readonly number[],
+    dilations: readonly number[],
+    kernelShape: readonly number[],
+    pads: number[],
+    autoPad?: string,
+    ceilMode = 0,
+  ) {
     if (isGlobalOperator) {
       for (let dim = 0; dim < inputDims.length - 2; dim++) {
         outputDims.push(1);
       }
     } else {
       for (let dim = 0; dim < inputDims.length - 2; dim++) {
-        outputDims.push(PoolConvUtil.adjustPadAndReturnShape(
-            inputDims[dim + 2], strides[dim], dilations[dim], kernelShape[dim], pads, dim, dim + inputDims.length - 2,
-            autoPad));
+        outputDims.push(
+          PoolConvUtil.adjustPadAndReturnShape(
+            inputDims[dim + 2],
+            strides[dim],
+            dilations[dim],
+            kernelShape[dim],
+            pads,
+            dim,
+            dim + inputDims.length - 2,
+            autoPad,
+            ceilMode,
+          ),
+        );
       }
     }
+  }
+
+  // Computes the output spatial size for a single dimension.
+  // Produces results identical to the C++ PoolAttributes::ComputeOutputSize
+  // (onnxruntime/core/providers/cpu/nn/pool_attributes.h), including the ceil_mode
+  // "shrink the last window if it starts entirely in the trailing padding" rule. The JS
+  // signature takes a pre-computed `numerator` (equal to `inSize + padHead + padTail - dkernel`,
+  // matching the C++ `in_size + pad_head + pad_tail - dilation * (kernel - 1) - 1`) instead of
+  // the raw pooling attributes, but the computed output size is the same.
+  // Keep in sync with the onnxjs/jsep copy.
+  private static computeOutputSize(
+    numerator: number,
+    stride: number,
+    inSize: number,
+    padHead: number,
+    ceilMode: number,
+  ): number {
+    let outSize = Math.floor(numerator / stride) + 1;
+    // Match C++ `ceil_mode == 1` exactly so out-of-spec ceil_mode values do not diverge.
+    if (ceilMode === 1) {
+      outSize = Math.ceil(numerator / stride) + 1;
+      // Ensure the last pooling window starts inside the image (ref: https://github.com/onnx/onnx/pull/5741).
+      // inSize and padHead are needed here to reconstruct the last window's start position.
+      if ((outSize - 1) * stride >= inSize + padHead) {
+        outSize -= 1;
+      }
+    }
+    return outSize;
   }
 
   // helper for computeShapeHelper() and adjustPadsBasedOnAutoPad()
   // adjusts pad value for given 'autoPad' string and computes output shape along a particular dimension
   private static adjustPadAndReturnShape(
-      inSize: number, stride: number, dilation: number, kernel: number, pads: number[], padHeadIndex: number,
-      padTailIndex: number, autoPad?: string): number {
+    inSize: number,
+    stride: number,
+    dilation: number,
+    kernel: number,
+    pads: number[],
+    padHeadIndex: number,
+    padTailIndex: number,
+    autoPad?: string,
+    ceilMode = 0,
+  ): number {
     const dkernel = dilation * (kernel - 1) + 1;
     if (autoPad && autoPad !== 'NOTSET') {
       switch (autoPad) {
         case 'VALID':
           pads[padHeadIndex] = 0;
           pads[padTailIndex] = 0;
-          return Math.floor(((inSize - dkernel) / stride) + 1);
+          return PoolConvUtil.computeOutputSize(inSize - dkernel, stride, inSize, 0, ceilMode);
         case 'SAME_LOWER':
         case 'SAME_UPPER':
           if (dilation !== 1) {
             throw new Error('Dilation not supported for SAME_UPPER or SAME_LOWER');
           } else {
-            const legacyTargetSize = (inSize + stride - 1) / stride;
+            // Integer division to match C++ pool_attributes.h ComputeSizePadDilations; float division mis-rounds SAME_* pads.
+            const legacyTargetSize = Math.floor((inSize + stride - 1) / stride);
             const padNeeded = (legacyTargetSize - 1) * stride + kernel - inSize;
-            pads[padHeadIndex] =
-                (autoPad === 'SAME_LOWER') ? Math.floor((padNeeded + 1) / 2) : Math.floor(padNeeded / 2);
+            pads[padHeadIndex] = autoPad === 'SAME_LOWER' ? Math.floor((padNeeded + 1) / 2) : Math.floor(padNeeded / 2);
             pads[padTailIndex] = padNeeded - pads[padHeadIndex];
-            return Math.floor(((inSize + padNeeded - kernel) / stride) + 1);
+            return PoolConvUtil.computeOutputSize(
+              inSize + pads[padHeadIndex] + pads[padTailIndex] - dkernel,
+              stride,
+              inSize,
+              pads[padHeadIndex],
+              ceilMode,
+            );
           }
         default:
           throw new Error('Unsupported AutoPad type');
       }
     } else {
-      return Math.floor(((inSize + pads[padHeadIndex] + pads[padTailIndex] - dkernel) / stride) + 1);
+      return PoolConvUtil.computeOutputSize(
+        inSize + pads[padHeadIndex] + pads[padTailIndex] - dkernel,
+        stride,
+        inSize,
+        pads[padHeadIndex],
+        ceilMode,
+      );
     }
   }
 }
@@ -441,8 +553,12 @@ export class GemmUtil {
   // and return back the shape of the output in the form of a tuple
   // will throw exception if the input shapes are not compatible
   static getShapeOfGemmResult(
-      leftShape: readonly number[], transLeft: boolean, rightShape: readonly number[], transRight: boolean,
-      biasShape?: readonly number[]): readonly number[] {
+    leftShape: readonly number[],
+    transLeft: boolean,
+    rightShape: readonly number[],
+    transRight: boolean,
+    biasShape?: readonly number[],
+  ): readonly number[] {
     if (leftShape.length !== 2 || rightShape.length !== 2) {
       throw new Error('shape need to be of size 2');
     }
@@ -485,6 +601,5 @@ export class GemmUtil {
   }
 }
 
-
-export const MIN_CLIP = -3.4028234663852886e+38;
-export const MAX_CLIP = 3.4028234663852886e+38;
+export const MIN_CLIP = -3.4028234663852886e38;
+export const MAX_CLIP = 3.4028234663852886e38;

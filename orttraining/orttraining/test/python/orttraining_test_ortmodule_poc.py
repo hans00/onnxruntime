@@ -44,7 +44,7 @@ def train(args, model, device, optimizer, loss_fn, train_loader, epoch):
         probability = model(data)
 
         if args.view_graphs:
-            import torchviz
+            import torchviz  # noqa: PLC0415
 
             pytorch_backward_graph = torchviz.make_dot(probability, params=dict(list(model.named_parameters())))
             pytorch_backward_graph.view()
@@ -201,7 +201,7 @@ def main():
         # Set log level
         numeric_level = getattr(logging, args.log_level.upper(), None)
         if not isinstance(numeric_level, int):
-            raise ValueError("Invalid log level: %s" % args.log_level)
+            raise ValueError(f"Invalid log level: {args.log_level}")
         logging.basicConfig(level=numeric_level)
     else:
         print("Training MNIST on vanilla PyTorch....")

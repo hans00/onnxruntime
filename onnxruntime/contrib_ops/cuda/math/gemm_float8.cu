@@ -15,6 +15,7 @@
 #include "contrib_ops/cuda/math/gemm_float8.h"
 #include "core/providers/cuda/cu_inc/common.cuh"
 #include "core/providers/cuda/shared_inc/cuda_utils.h"
+#include "core/providers/cuda/cuda_common_type_helpers.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -207,7 +208,7 @@ Status GemmFloat8::ComputeGemm(
 #endif
         case CUDA_R_8F_E4M3:
         case CUDA_R_8F_E5M2:
-          compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
+          compute_type = CUBLAS_COMPUTE_32F;
           break;
 #endif
         default:
@@ -219,7 +220,7 @@ Status GemmFloat8::ComputeGemm(
       compute_type = CUBLAS_COMPUTE_32F_FAST_16BF;
       break;
     case CUDA_R_32F:
-      compute_type = CUBLAS_COMPUTE_32F_FAST_TF32;
+      compute_type = CUBLAS_COMPUTE_32F;
       break;
     default:
       ORT_THROW("Unable to determine computeType in operator GemmFloat8.");

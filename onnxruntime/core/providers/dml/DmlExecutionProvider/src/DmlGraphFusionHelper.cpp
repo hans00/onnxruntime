@@ -3,6 +3,11 @@
 #include "DmlGraphFusionHelper.h"
 #include "DmlRuntimeFusedGraphKernel.h"
 
+#include "core/common/endian.h"
+#include "core/framework/endian_utils.h"
+
+using namespace Windows::AI::MachineLearning::Adapter;
+
 namespace Dml
 {
 namespace DmlGraphFusionHelper
@@ -94,13 +99,13 @@ namespace DmlGraphFusionHelper
         ID3D12Resource** resource,
         uint64_t* allocId)
     {
-        IUnknown* allocationUnk = static_cast<IUnknown*>(const_cast<void*>(tensor->DataRaw()));
-        Microsoft::WRL::ComPtr<IUnknown> resourceUnk;
-        winmlProvider->GetABIDataInterface(false, allocationUnk, &resourceUnk);
+        IUnknown* allocationUnknown = static_cast<IUnknown*>(const_cast<void*>(tensor->DataRaw()));
+        Microsoft::WRL::ComPtr<IUnknown> resourceUnknown;
+        winmlProvider->GetABIDataInterface(false, allocationUnknown, &resourceUnknown);
 
-        *allocId = winmlProvider->TryGetPooledAllocationId(allocationUnk, 0);
+        *allocId = winmlProvider->TryGetPooledAllocationId(allocationUnknown, 0);
 
-        ORT_THROW_IF_FAILED(resourceUnk->QueryInterface(resource));
+        ORT_THROW_IF_FAILED(resourceUnknown->QueryInterface(resource));
     }
 
     std::tuple<std::unique_ptr<std::byte[]>, std::vector<uint8_t>, std::byte*, size_t> UnpackInitializer(
@@ -115,9 +120,45 @@ namespace DmlGraphFusionHelper
         // The tensor may be stored as raw data or in typed fields.
         if (initializer->data_location() == onnx::TensorProto_DataLocation_EXTERNAL)
         {
-            THROW_IF_NOT_OK(onnxruntime::utils::UnpackInitializerData(*initializer, graph.ModelPath(), unpackedExternalTensor));
-            tensorPtr = reinterpret_cast<std::byte*>(unpackedExternalTensor.data());
-            tensorByteSize = unpackedExternalTensor.size();
+            std::basic_string<ORTCHAR_T> externalFilePath;
+            onnxruntime::FileOffsetType fileOffset;
+            SafeInt<size_t> safeTensorByteSize;
+            THROW_IF_NOT_OK(onnxruntime::utils::GetExternalDataInfo(*initializer,  graph.ModelPath(), /*out*/ externalFilePath, /*out*/ fileOffset, /*out*/ safeTensorByteSize));
+            if (externalFilePath == onnxruntime::utils::kTensorProtoLittleEndianMemoryAddressTag)
+            {
+                if constexpr (onnxruntime::endian::native != onnxruntime::endian::little)
+                {
+                    unpackedTensor.reset(new std::byte[safeTensorByteSize]);
+
+                    auto src = gsl::make_span<const unsigned char>(reinterpret_cast<const unsigned char*>(fileOffset), safeTensorByteSize);
+                    auto dst = gsl::make_span<unsigned char>(reinterpret_cast<unsigned char*>(unpackedTensor.get()), safeTensorByteSize);
+                    size_t element_size = onnxruntime::utils::GetElementSizeOfTensor(static_cast<ONNX_NAMESPACE::TensorProto_DataType>(initializer->data_type()));
+
+                    // If element size is unknown, set it to 1 to disable byteswapping
+                    if (element_size < 1) element_size = 1;
+
+                    THROW_IF_NOT_OK(onnxruntime::utils::ReadLittleEndian(element_size, src, dst));
+
+                    tensorPtr = unpackedTensor.get();
+                    tensorByteSize = safeTensorByteSize;
+                }
+                else
+                {
+                    tensorPtr = reinterpret_cast<std::byte*>(fileOffset);
+                    tensorByteSize = safeTensorByteSize;
+                }
+            }
+            else if (externalFilePath == onnxruntime::utils::kTensorProtoNativeEndianMemoryAddressTag)
+            {
+                tensorPtr = reinterpret_cast<std::byte*>(fileOffset);
+                tensorByteSize = safeTensorByteSize;
+            }
+            else
+            {
+                THROW_IF_NOT_OK(onnxruntime::utils::UnpackInitializerData(*initializer, graph.ModelPath(), unpackedExternalTensor));
+                tensorPtr = reinterpret_cast<std::byte*>(unpackedExternalTensor.data());
+                tensorByteSize = unpackedExternalTensor.size();
+            }
         }
         else if (initializer->has_raw_data())
         {
@@ -218,8 +259,6 @@ namespace DmlGraphFusionHelper
                     }
                 }
 
-                // Tensor sizes in DML must be a multiple of 4 bytes large.
-                tensorByteSize = AlignToPow2<size_t>(tensorByteSize, 4);
                 if(graphSerializationEnabled)
                 {
                     WriteToFile(modelName, ConvertToWString(iter->first) + L".bin", reinterpret_cast<uint8_t*>(tensorPtr), tensorByteSize);
@@ -250,9 +289,10 @@ namespace DmlGraphFusionHelper
                         initializeInputBuffer = CreateCpuResource(providerImpl, tensorPtr, tensorByteSize);
                     }
 
-                    // Set the binding for operator initialization to the buffer
+                    // Set the binding for operator initialization to the buffer.
+                    // DML requires buffer binding sizes to be a multiple of 4 bytes.
                     initInputBindings[i].Buffer = initializeInputBuffer.Get();
-                    initInputBindings[i].SizeInBytes = tensorByteSize;
+                    initInputBindings[i].SizeInBytes = AlignToPow2<size_t>(tensorByteSize, 4);
                     initializeResourceRefs.push_back(std::move(initializeInputBuffer));
                 }
 
@@ -363,10 +403,10 @@ namespace DmlGraphFusionHelper
                     oldNodeIndexToNewNodeIndexMap[index] = static_cast<uint32_t>(dmlGraphNodes.size());
 
                     auto& constantData = std::get<ConstantData>(constantNodeVariant);
-                    
+
                     DML_CONSTANT_DATA_GRAPH_NODE_DESC* constantNode = allocator.template Allocate<DML_CONSTANT_DATA_GRAPH_NODE_DESC>();
                     constantNode->Name = node.Name.data();
-                    constantNode->DataSize = constantData.dataSize;
+                    constantNode->DataSize = gsl::narrow_cast<size_t>(constantData.dataSize);
                     constantNode->Data = constantData.data;
                     dmlGraphNodes.push_back(DML_GRAPH_NODE_DESC{DML_GRAPH_NODE_TYPE_CONSTANT, constantNode});
                 }
@@ -598,16 +638,16 @@ namespace DmlGraphFusionHelper
     {
         if (graphSerializationEnabled)
         {
-        
+
           const std::wstring modelName = GetModelName(graph.ModelPath());
           auto buffer = SerializeDmlGraph(graphDesc);
-        
+
           const std::wstring partitionName =
               L"Partition_" +
               std::to_wstring(partitionIndex) +
               L".bin";
           WriteToFile(modelName, partitionName, buffer.data(), buffer.size());
-        
+
           std::vector<std::unique_ptr<std::byte[]>> rawData;
           DmlSerializedGraphDesc deserializedGraphDesc = DeserializeDmlGraph(buffer.data(), rawData);
           GraphDescBuilder::GraphDesc deserializedDmlGraphDesc = {};
@@ -619,7 +659,7 @@ namespace DmlGraphFusionHelper
           deserializedDmlGraphDesc.OutputEdges = std::move(deserializedGraphDesc.OutputEdges);
           deserializedDmlGraphDesc.reuseCommandList = graphDesc.reuseCommandList;
           deserializedDmlGraphDesc.outputShapes = graphDesc.outputShapes;
-        
+
           compiledExecutionPlanOperator = DmlGraphFusionHelper::TryCreateCompiledOperator(
                           deserializedDmlGraphDesc,
                           indexedSubGraph,
@@ -654,7 +694,7 @@ namespace DmlGraphFusionHelper
             initializeResourceRefs,
             nullptr);
 
-        // lamda captures for the kernel registration
+        // lambda captures for the kernel registration
         Windows::AI::MachineLearning::Adapter::EdgeShapes outputShapes;
         ORT_THROW_HR_IF(E_UNEXPECTED, !TryGetStaticOutputShapes(fusedNode, outputShapes));
         bool resuableCommandList = graphDesc.reuseCommandList;
@@ -716,7 +756,8 @@ namespace DmlGraphFusionHelper
             *indexedSubGraph,
             std::move(graphNodePropertyMap));
 
-        auto modelPath = graph.ModelPath();
+        // Owned copy: the closure registered below outlives this frame.
+        std::filesystem::path modelPath = graph.ModelPath();
 
         const gsl::span<const std::string> subGraphInputArgNames = indexedSubGraph->GetMetaDef()->inputs;
         const gsl::span<const std::string> subGraphOutputArgNames = indexedSubGraph->GetMetaDef()->outputs;
@@ -796,10 +837,10 @@ namespace DmlGraphFusionHelper
             kvp.second.first = &ownedInitializers.back();
         }
 
-        // lamda captures for the kernel registration
+        // lambda captures for the kernel registration
         auto fused_kernel_func = [
             indexedSubGraph,
-            &modelPath,
+            modelPath,
             nodesInfo = std::move(nodesInfo),
             intermediateNodeArgs = std::move(intermediateNodeArgs),
             subgraphInputs = std::move(subgraphInputs),
@@ -843,11 +884,11 @@ namespace DmlGraphFusionHelper
             .Provider(onnxruntime::kDmlExecutionProvider);
 
         // Force the CPU inputs to be allocated on the CPU
-        for (int i = 0; i < subGraphInputArgNames.size(); ++i)
+        for (size_t i = 0; i < subGraphInputArgNames.size(); ++i)
         {
             if (dynamicCpuInputMap.find(subGraphInputArgNames[i]) != dynamicCpuInputMap.end())
             {
-                builder.InputMemoryType(OrtMemTypeCPUInput, i);
+                builder.InputMemoryType(OrtMemTypeCPUInput, static_cast<int>(i));
             }
         }
 
@@ -857,6 +898,257 @@ namespace DmlGraphFusionHelper
         fusedNode.SetExecutionProviderType(onnxruntime::kDmlExecutionProvider);
 
         graph.FinalizeFuseSubGraph(*indexedSubGraph, fusedNode);
+    }
+
+    std::unique_ptr<DmlReusedCommandListState> BuildReusableCommandList(
+        IExecutionProvider* provider,
+        IDMLCompiledOperator* compiledExecutionPlanOperator,
+        ID3D12Resource* persistentResource,
+        std::optional<DML_BUFFER_BINDING> persistentResourceBinding)
+    {
+        auto commandListState = std::make_unique<DmlReusedCommandListState>();
+
+        ComPtr<IDMLDevice> device;
+        ORT_THROW_IF_FAILED(provider->GetDmlDevice(device.GetAddressOf()));
+
+        DML_BINDING_PROPERTIES execBindingProps = compiledExecutionPlanOperator->GetBindingProperties();
+
+        D3D12_DESCRIPTOR_HEAP_DESC desc = {};
+        desc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+        desc.NumDescriptors = execBindingProps.RequiredDescriptorCount;
+        desc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
+
+        ComPtr<ID3D12Device> d3dDevice;
+        ORT_THROW_IF_FAILED(provider->GetD3DDevice(d3dDevice.GetAddressOf()));
+
+        ORT_THROW_IF_FAILED(d3dDevice->CreateDescriptorHeap(&desc, IID_GRAPHICS_PPV_ARGS(commandListState->heap.ReleaseAndGetAddressOf())));
+
+        // Create a binding table for execution.
+        DML_BINDING_TABLE_DESC bindingTableDesc = {};
+        bindingTableDesc.Dispatchable = compiledExecutionPlanOperator;
+        bindingTableDesc.CPUDescriptorHandle = commandListState->heap->GetCPUDescriptorHandleForHeapStart();
+        bindingTableDesc.GPUDescriptorHandle = commandListState->heap->GetGPUDescriptorHandleForHeapStart();
+        bindingTableDesc.SizeInDescriptors = execBindingProps.RequiredDescriptorCount;
+
+        ORT_THROW_IF_FAILED(device->CreateBindingTable(&bindingTableDesc, IID_PPV_ARGS(&commandListState->bindingTable)));
+
+        ORT_THROW_IF_FAILED(d3dDevice->CreateCommandAllocator(
+            provider->GetCommandListTypeForQueue(),
+            IID_GRAPHICS_PPV_ARGS(commandListState->commandAllocator.ReleaseAndGetAddressOf())));
+
+        ORT_THROW_IF_FAILED(d3dDevice->CreateCommandList(
+            0,
+            provider->GetCommandListTypeForQueue(),
+            commandListState->commandAllocator.Get(),
+            nullptr,
+            IID_GRAPHICS_PPV_ARGS(commandListState->graphicsCommandList.ReleaseAndGetAddressOf())));
+
+        if (persistentResource)
+        {
+            DML_BINDING_DESC persistentResourceBindingDesc =
+                { DML_BINDING_TYPE_BUFFER, persistentResourceBinding ? &*persistentResourceBinding : nullptr };
+            commandListState->bindingTable->BindPersistentResource(&persistentResourceBindingDesc);
+        }
+
+        ID3D12DescriptorHeap* descriptorHeaps[] = { commandListState->heap.Get() };
+        commandListState->graphicsCommandList->SetDescriptorHeaps(ARRAYSIZE(descriptorHeaps), descriptorHeaps);
+
+        ComPtr<IDMLCommandRecorder> recorder;
+        ORT_THROW_IF_FAILED(device->CreateCommandRecorder(IID_PPV_ARGS(recorder.GetAddressOf())));
+
+        recorder->RecordDispatch(commandListState->graphicsCommandList.Get(), compiledExecutionPlanOperator, commandListState->bindingTable.Get());
+
+        ORT_THROW_IF_FAILED(commandListState->graphicsCommandList->Close());
+
+        return commandListState;
+    }
+
+    void ExecuteReusableCommandList(
+        onnxruntime::OpKernelContext* kernelContext,
+        DmlReusedCommandListState& commandListState,
+        IDMLCompiledOperator* compiledExecutionPlanOperator,
+        const onnxruntime::OpKernelInfo& kernelInfo,
+        gsl::span<const uint8_t> isInputsUploadedByDmlEP,
+        const std::vector<bool>& inputsUsed,
+        gsl::span<const ComPtr<ID3D12Resource>> nonOwnedGraphInputsFromInitializers,
+        const Windows::AI::MachineLearning::Adapter::EdgeShapes& outputShapes,
+        IWinmlExecutionProvider* winmlProvider,
+        IExecutionProvider* provider,
+        IUnknown* persistentResourceAllocatorUnknown,
+        bool keepTemporaryResourceAlive)
+    {
+        DML_BINDING_PROPERTIES execBindingProps = compiledExecutionPlanOperator->GetBindingProperties();
+
+        std::vector<DML_BUFFER_BINDING> inputBindings(kernelContext->InputCount());
+        std::vector<DML_BINDING_DESC> inputBindingDescs(kernelContext->InputCount());
+
+        OpKernelContextWrapper contextWrapper(
+            kernelContext,
+            kernelInfo.GetExecutionProvider(),
+            true,
+            nullptr);
+
+        // Populate input bindings, excluding those which were specified as owned by DML and provided
+        // at initialization instead.
+        commandListState.inputBindingAllocIds.resize(inputBindings.size());
+        bool inputBindingsChanged = false;
+
+        for (uint32_t i = 0; i < inputBindings.size(); ++i)
+        {
+            if (!isInputsUploadedByDmlEP[i] && inputsUsed[i])
+            {
+                if (nonOwnedGraphInputsFromInitializers[i])
+                {
+                    inputBindings[i].Buffer = nonOwnedGraphInputsFromInitializers[i].Get();
+                    inputBindings[i].SizeInBytes = nonOwnedGraphInputsFromInitializers[i]->GetDesc().Width;
+                    inputBindingDescs[i] = {DML_BINDING_TYPE_BUFFER, &inputBindings[i]};
+                }
+                else
+                {
+                    assert(kernelContext->InputType(gsl::narrow_cast<int>(i))->IsTensorType());
+                    const onnxruntime::Tensor* tensor = kernelContext->Input<onnxruntime::Tensor>(gsl::narrow_cast<int>(i));
+
+                    uint64_t allocId;
+                    DmlGraphFusionHelper::UnwrapTensor(winmlProvider, tensor, &inputBindings[i].Buffer, &allocId);
+                    inputBindingsChanged = inputBindingsChanged || (!allocId || commandListState.inputBindingAllocIds[i] != allocId);
+                    inputBindings[i].Buffer->Release(); // Avoid holding an additional reference
+                    inputBindings[i].SizeInBytes = DmlGraphFusionHelper::AlignToPow2<size_t>(tensor->SizeInBytes(), 4);
+                    inputBindingDescs[i] = {DML_BINDING_TYPE_BUFFER, &inputBindings[i]};
+                    commandListState.inputBindingAllocIds[i] = allocId;
+                }
+            }
+        }
+
+        if (inputBindingsChanged)
+        {
+            commandListState.bindingTable->BindInputs(gsl::narrow_cast<uint32_t>(inputBindingDescs.size()), inputBindingDescs.data());
+        }
+
+        // Populate Output bindings
+        std::vector<DML_BUFFER_BINDING> outputBindings(kernelContext->OutputCount());
+        std::vector<DML_BINDING_DESC> outputBindingDescs(kernelContext->OutputCount());
+
+        commandListState.outputBindingAllocIds.resize(outputBindings.size());
+        bool outputBindingsChanged = false;
+
+        for (uint32_t i = 0; i < outputBindings.size(); ++i)
+        {
+            std::vector<int64_t> outputDims;
+            outputDims.reserve(outputShapes.GetShape(i).size());
+            for (uint32_t dimSize : outputShapes.GetShape(i))
+            {
+                outputDims.push_back(dimSize);
+            }
+
+            onnxruntime::Tensor* tensor = kernelContext->Output(
+                static_cast<int>(i),
+                onnxruntime::TensorShape::FromExistingBuffer(outputDims)
+                );
+
+            uint64_t allocId;
+            DmlGraphFusionHelper::UnwrapTensor(winmlProvider, tensor, &outputBindings[i].Buffer, &allocId);
+            outputBindingsChanged = outputBindingsChanged || (!allocId || commandListState.outputBindingAllocIds[i] != allocId);
+            outputBindings[i].Buffer->Release(); // Avoid holding an additional reference
+            outputBindings[i].SizeInBytes = DmlGraphFusionHelper::AlignToPow2<size_t>(tensor->SizeInBytes(), 4);
+            outputBindingDescs[i] = {DML_BINDING_TYPE_BUFFER, &outputBindings[i]};
+            commandListState.outputBindingAllocIds[i] = allocId;
+        }
+
+        if (outputBindingsChanged)
+        {
+            commandListState.bindingTable->BindOutputs(gsl::narrow_cast<uint32_t>(outputBindingDescs.size()), outputBindingDescs.data());
+        }
+
+        if (execBindingProps.TemporaryResourceSize > 0)
+        {
+            // Allocate temporary data which will automatically be freed when the GPU work
+            // which is scheduled up to the point that this method returns has completed.
+            ComPtr<IUnknown> tempAlloc;
+            uint64_t tempAllocId = 0;
+            ORT_THROW_IF_FAILED(contextWrapper.AllocateTemporaryData(static_cast<size_t>(execBindingProps.TemporaryResourceSize), tempAlloc.GetAddressOf(), &tempAllocId));
+
+            ComPtr<IUnknown> tempResourceUnknown;
+            winmlProvider->GetABIDataInterface(false, tempAlloc.Get(), &tempResourceUnknown);
+
+            // Bind the temporary resource.
+            ComPtr<ID3D12Resource> tempResource;
+            ORT_THROW_IF_FAILED(tempResourceUnknown->QueryInterface(tempResource.GetAddressOf()));
+            DML_BUFFER_BINDING tempBufferBinding = {tempResource.Get(), 0, execBindingProps.TemporaryResourceSize};
+            DML_BINDING_DESC tempBindingDesc = { DML_BINDING_TYPE_BUFFER, &tempBufferBinding };
+
+            if (!tempAllocId || commandListState.tempBindingAllocId != tempAllocId)
+            {
+                commandListState.bindingTable->BindTemporaryResource(&tempBindingDesc);
+            }
+
+            commandListState.tempBindingAllocId = tempAllocId;
+
+            if (keepTemporaryResourceAlive)
+            {
+                commandListState.temporaryResource = std::move(tempResource);
+            }
+        }
+
+        // Execute the command list and if it succeeds, update the fence value at which this command may be
+        // re-used.
+        ComPtr<ID3D12Fence> fence;
+        uint64_t completionValue;
+        HRESULT hr = provider->ExecuteCommandList(commandListState.graphicsCommandList.Get(), fence.GetAddressOf(), &completionValue);
+
+        // ExecuteCommandList may report any of the device-lost / removal-class HRESULTs when
+        // the GPU device has transitioned to a "removed" state. Windows often surfaces these
+        // through FormatMessage as "...most likely because of an invalid command...", but in
+        // practice they almost always indicate a Timeout Detection and Recovery (TDR) event
+        // (e.g. a long-running shader exceeding the system TdrDelay), a driver fault, or a
+        // hardware reset rather than a malformed command from the calling application.
+        //
+        // GetDeviceRemovedReason on the DML and D3D12 devices reports the underlying reason
+        // when the device has been removed. Throw with the most specific reason and a
+        // clearer message so that downstream tooling (Watson, telemetry, anyone reading the
+        // log) doesn't have to guess at the cause.
+        if (hr == DXGI_ERROR_DEVICE_REMOVED ||
+            hr == DXGI_ERROR_DEVICE_HUNG ||
+            hr == DXGI_ERROR_DEVICE_RESET ||
+            hr == DXGI_ERROR_DRIVER_INTERNAL_ERROR)
+        {
+            ComPtr<ID3D12Device> d3dDevice;
+            ComPtr<IDMLDevice> dmlDevice;
+            ORT_THROW_IF_FAILED(provider->GetD3DDevice(&d3dDevice));
+            ORT_THROW_IF_FAILED(provider->GetDmlDevice(&dmlDevice));
+
+            const HRESULT dmlRemovedReason = dmlDevice->GetDeviceRemovedReason();
+            const HRESULT d3dRemovedReason = d3dDevice->GetDeviceRemovedReason();
+
+            // Prefer the more-specific reason returned by GetDeviceRemovedReason - matching
+            // the prior behavior for DXGI_ERROR_DEVICE_REMOVED and the pattern in
+            // DmlCommandRecorder.cpp which checks DML first, then D3D12. Fall back to the
+            // original ExecuteCommandList HRESULT if neither device reports a removal reason.
+            const HRESULT throwHr = FAILED(dmlRemovedReason) ? dmlRemovedReason
+                                  : FAILED(d3dRemovedReason) ? d3dRemovedReason
+                                                             : hr;
+
+            ORT_THROW_HR_MSG(throwHr,
+                "DirectML execution failed because of a device-lost / removal-class error. "
+                "Windows may report this as 'invalid command' via FormatMessage, but in practice "
+                "this often indicates a Timeout Detection and Recovery (TDR) event (e.g. a shader "
+                "exceeding the system TdrDelay), a driver fault, or a hardware reset rather than "
+                "a malformed command from the application. ExecuteCommandList HRESULT=0x%08X, "
+                "ID3D12Device::GetDeviceRemovedReason=0x%08X, "
+                "IDMLDevice::GetDeviceRemovedReason=0x%08X.",
+                static_cast<unsigned int>(hr),
+                static_cast<unsigned int>(d3dRemovedReason),
+                static_cast<unsigned int>(dmlRemovedReason));
+        }
+
+        ORT_THROW_IF_FAILED(hr);
+        commandListState.fence = fence;
+        commandListState.completionValue = completionValue;
+
+        // Queue references to objects which must be kept alive until resulting GPU work completes
+        winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(commandListState.graphicsCommandList).Get());
+        winmlProvider->QueueReference(WRAP_GRAPHICS_UNKNOWN(commandListState.heap).Get());
+        winmlProvider->QueueReference(commandListState.bindingTable.Get());
+        winmlProvider->QueueReference(persistentResourceAllocatorUnknown);
     }
 }
 }

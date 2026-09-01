@@ -74,7 +74,8 @@ static Ort::Session GetSessionObj(Ort::Env& env, T model_uri, int provider_type)
 
   if (provider_type == 1) {
 #ifdef USE_CUDA
-    Ort::ThrowOnError(OrtSessionOptionsAppendExecutionProvider_CUDA(session_options, 0));
+    Ort::CUDAProviderOptions options;
+    session_options.AppendExecutionProvider_CUDA_V2(*options);
     std::cout << "Running simple inference with cuda provider" << std::endl;
 #else
     return Ort::Session(nullptr);

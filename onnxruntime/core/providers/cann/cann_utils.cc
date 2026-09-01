@@ -4,6 +4,7 @@
 
 #include <unistd.h>
 #include <algorithm>
+#include <string>
 
 #include "core/providers/cann/cann_utils.h"
 
@@ -220,38 +221,37 @@ bool FileExist(const std::string& file_name) {
 
 void GenerateHashValue(const std::string string, HashValue& hash_value) {
   uint32_t hash[4] = {0, 0, 0, 0};
-  MurmurHash3::x86_128(string.data(), gsl::narrow_cast<int32_t>(string.size()), hash[0], &hash);
+  MurmurHash3::x86_128(string.data(), string.size(), hash[0], &hash);
   hash_value = hash[0] | (uint64_t(hash[1]) << 32);
 }
 
-Status ComputeOutputShape(const std::string& node_name, const TensorShape& lhs_shape,
-                          const TensorShape& rhs_shape, TensorShape& out_shape) {
-  size_t lhs_rank = lhs_shape.NumDimensions();
-  size_t rhs_rank = rhs_shape.NumDimensions();
-  size_t out_rank = std::max(lhs_rank, rhs_rank);
-
-  std::vector<int64_t> output_dims(out_rank, 0);
-  for (size_t i = 0; i < out_rank; ++i) {
-    int64_t lhs_dim = 1;
-    if (i < lhs_rank)
-      lhs_dim = lhs_shape[lhs_rank - 1 - i];
-    int64_t rhs_dim = 1;
-    if (i < rhs_rank)
-      rhs_dim = rhs_shape[rhs_rank - 1 - i];
-    int64_t max = std::max(lhs_dim, rhs_dim);
-    int64_t min = std::min(lhs_dim, rhs_dim);
-    int64_t out_dim = (min == 0 ? min : max);  // special case a dim value of 0.
-    if (lhs_dim != out_dim && lhs_dim != 1)
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, node_name, ": left operand cannot broadcast on dim ", lhs_rank - 1 - i,
-                             " LeftShape: ", lhs_shape.ToString(), ", RightShape: ", rhs_shape.ToString());
-    if (rhs_dim != out_dim && rhs_dim != 1)
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, node_name, ": right operand cannot broadcast on dim ", rhs_rank - 1 - i,
-                             " LeftShape: ", lhs_shape.ToString(), ", RightShape: ", rhs_shape.ToString());
-    output_dims[out_rank - 1 - i] = out_dim;
-  }
-  out_shape = TensorShape(output_dims);
-  return Status::OK();
+bool is_dynamic_shape(const aclmdlIODims& dims) {
+  return std::find(dims.dims, dims.dims + dims.dimCount, -1) != dims.dims + dims.dimCount;
 }
 
+namespace fs = std::filesystem;
+std::string MatchFile(const std::string& file_name) {
+  fs::path current_dir = fs::current_path();
+
+  for (const auto& entry : fs::directory_iterator(current_dir)) {
+    if (entry.is_regular_file()) {
+      std::string name = entry.path().filename().string();
+      if (name.find(file_name) != std::string::npos && entry.path().extension() == ".om") {
+        return name;
+      }
+    }
+  }
+  return "";
+}
+
+static bool repeat_acl_init_flag = false;
+
+bool GetRepeatInitFlag() {
+  return repeat_acl_init_flag;
+}
+
+void SetRepeatInitFlag(bool val) {
+  repeat_acl_init_flag = val;
+}
 }  // namespace cann
 }  // namespace onnxruntime

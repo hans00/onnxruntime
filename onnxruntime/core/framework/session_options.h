@@ -7,11 +7,18 @@
 #include <vector>
 #include <iostream>
 #include <codecvt>
-#include "core/common/gsl.h"
+#include <filesystem>
+#include <functional>
+#include <gsl/gsl>
 #include "core/common/inlined_containers.h"
+#include "core/framework/allocator.h"
 #include "core/framework/config_options.h"
+#include "core/framework/ep_context_options.h"
 #include "core/framework/ort_value.h"
 #include "core/session/onnxruntime_c_api.h"
+// Needed for OrtReadNamedBufferFunc, the type of the EPContext data read callback stored in this struct. This include
+// can be removed once the experimental EPContext data callback APIs are promoted to the stable C API.
+#include "core/session/onnxruntime_experimental_c_api.h"
 #include "core/optimizer/graph_transformer_level.h"
 #include "core/util/thread_utils.h"
 
@@ -22,8 +29,9 @@
 namespace onnxruntime {
 
 enum class ExecutionOrder {
-  DEFAULT = 0,        // default topological sort
-  PRIORITY_BASED = 1  // priority-based topological sort
+  DEFAULT = 0,           // default topological sort
+  PRIORITY_BASED = 1,    // priority-based topological sort
+  MEMORY_EFFICIENT = 2,  // memory-efficient topological sort for training purposes.
 };
 
 inline std::ostream& operator<<(std::ostream& os, const ExecutionOrder& order) {
@@ -33,6 +41,9 @@ inline std::ostream& operator<<(std::ostream& os, const ExecutionOrder& order) {
       break;
     case ExecutionOrder::PRIORITY_BASED:
       os << "PRIORITY_BASED";
+      break;
+    case ExecutionOrder::MEMORY_EFFICIENT:
+      os << "MEMORY_EFFICIENT";
       break;
     default:
       os << "UNKNOWN";
@@ -57,8 +68,20 @@ enum class ExecutionPriority : int {
 
 struct FreeDimensionOverride {
   std::string dim_identifier;
-  FreeDimensionOverrideType dim_identifer_type;
+  FreeDimensionOverrideType dim_identifier_type;
   int64_t dim_value;
+};
+
+using CheckLoadCancellationFn = std::function<bool()>;
+
+struct EpSelectionPolicy {
+  // flag to detect that a policy was set by the user.
+  // need to preserve current behavior of defaulting to CPU EP if no EPs are explicitly registered
+  // and no selection policy was explicitly provided.
+  bool enable{false};
+  OrtExecutionProviderDevicePolicy policy = OrtExecutionProviderDevicePolicy_DEFAULT;
+  EpSelectionDelegate delegate{};
+  void* state{nullptr};  // state for the delegate
 };
 
 /**
@@ -85,7 +108,7 @@ struct SessionOptions {
   //
   // If session config value is not set, it will be assumed to be ONNX
   // unless the filepath ends in '.ort' (case insensitive).
-  std::basic_string<ORTCHAR_T> optimized_model_filepath;
+  std::filesystem::path optimized_model_filepath;
 
   // enable the memory pattern optimization.
   // The idea is if the input shapes are the same, we could trace the internal memory allocation
@@ -119,7 +142,7 @@ struct SessionOptions {
   unsigned max_num_graph_transformation_steps = 10;  // TODO choose a good default here?
 
   // set graph optimization level
-  TransformerLevel graph_optimization_level = TransformerLevel::Level3;
+  TransformerLevel graph_optimization_level = TransformerLevel::MaxLevel;
 
   // controls the size of the thread pool used to parallelize the execution of tasks within individual nodes (ops)
   OrtThreadPoolParams intra_op_param;
@@ -146,6 +169,7 @@ struct SessionOptions {
   // The configuration keys and value formats are defined in
   // /include/onnxruntime/core/session/onnxruntime_session_options_config_keys.h
   ConfigOptions config_options;
+
   std::unordered_map<std::string, const OrtValue*> initializers_to_share_map;
 
   // See onnxruntime_c_api.h for detailed documentation.
@@ -155,6 +179,9 @@ struct SessionOptions {
   // Customer supplied pre-processed data for external initializers
   InlinedHashMap<std::string, OrtValue> external_initializers;
   Status AddExternalInitializers(gsl::span<const std::string> names, gsl::span<const OrtValue> values);
+  InlinedHashMap<PathString, std::pair<char*, size_t>> external_initializer_files_mmap;
+  Status AddExternalInitializersFromFilesInMemory(gsl::span<const PathString> file_names,
+                                                  gsl::span<std::pair<char*, const size_t>> files_buffers);
 #endif
 
   // custom function callback to create a thread
@@ -176,6 +203,35 @@ struct SessionOptions {
   // User specified logging func and param
   OrtLoggingFunction user_logging_function = nullptr;
   void* user_logging_param = nullptr;
+
+  void SetLoadCancellationFlag(bool value) noexcept {
+    *load_cancellation_flag = value;
+  }
+
+  bool IsLoadCancellationFlagSet() const noexcept {
+    return *load_cancellation_flag;
+  }
+
+  // Load cancellation flag is necessary to be within shared memory as session_options are
+  // copied internally and the flag needs to be accessible across all copies.
+  std::shared_ptr<std::atomic_bool> load_cancellation_flag = std::make_shared<std::atomic_bool>(false);
+
+  // Policy to guide Execution Provider selection
+  EpSelectionPolicy ep_selection_policy = {false,
+                                           OrtExecutionProviderDevicePolicy::OrtExecutionProviderDevicePolicy_DEFAULT,
+                                           nullptr};
+
+  // Options for generating compile EPContext models were previously stored in session_option.configs as
+  // string key/value pairs. To support more advanced options, such as setting input/output buffers, we
+  // now have to store EPContext options in a struct of type EpContextModelGenerationOptions.
+  // The function GetEpContextGenerationOptions() handles conversion of string key/value pairs to the new
+  // struct type.
+  bool has_explicit_ep_context_gen_options = false;
+  epctx::ModelGenOptions ep_context_gen_options = {};
+  epctx::ModelGenOptions GetEpContextGenerationOptions() const;
+
+  OrtReadNamedBufferFunc ep_context_data_read_func = nullptr;
+  void* ep_context_data_read_state = nullptr;
 };
 
 inline std::ostream& operator<<(std::ostream& os, const SessionOptions& session_options) {
@@ -199,10 +255,12 @@ inline std::ostream& operator<<(std::ostream& os, const SessionOptions& session_
      << " use_per_session_threads:" << session_options.use_per_session_threads
      << " thread_pool_allow_spinning:" << session_options.thread_pool_allow_spinning
      << " use_deterministic_compute:" << session_options.use_deterministic_compute
+     << " ep_selection_policy:" << session_options.ep_selection_policy.policy
      << " config_options: { " << session_options.config_options << " }"
   //<< " initializers_to_share_map:"          << session_options.initializers_to_share_map
 #if !defined(ORT_MINIMAL_BUILD) && !defined(DISABLE_EXTERNAL_INITIALIZERS)
   //<< " external_initializers:"             << session_options.external_initializers
+  //<< " external_initializer_files:"        << session_options.external_initializer_files
 #endif
 #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS)
   //<< " custom_op_libs:" << session_options.custom_op_libs

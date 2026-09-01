@@ -23,8 +23,8 @@ class ClipOpBuilder : public BaseOpBuilder {
 
   // Operator support related.
  private:
-  bool IsOpSupportedImpl(const InitializedTensorSet& initializers, const Node& node,
-                         const WebnnDeviceType /* device_type */, const logging::Logger& logger) const override;
+  bool IsOpSupportedImpl(const GraphViewer& graph_viewer, const Node& node,
+                         const WebnnDeviceType device_type, const logging::Logger& logger) const override;
 };
 
 // Add operator related.
@@ -51,14 +51,9 @@ Status ClipOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
                     "GetClipMinMax failed");
   options.set("minValue", minValue);
   options.set("maxValue", maxValue);
+  options.set("label", node.Name());
   emscripten::val input = model_builder.GetOperand(input_name);
-  emscripten::val output = emscripten::val::object();
-  if (Contains(model_builder.GetFusedActivations(), input_name)) {
-    LOGS_DEFAULT(VERBOSE) << "Clip Node [" << node.Name() << "] fused";
-    output = input;
-  } else {
-    output = model_builder.GetBuilder().call<emscripten::val>("clamp", input, options);
-  }
+  emscripten::val output = model_builder.GetBuilder().call<emscripten::val>("clamp", input, options);
 
   model_builder.AddOperand(output_name, std::move(output));
   return Status::OK();
@@ -66,15 +61,12 @@ Status ClipOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
 
 // Operator support related.
 
-bool ClipOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers,
+bool ClipOpBuilder::IsOpSupportedImpl(const GraphViewer& graph_viewer,
                                       const Node& node,
-                                      const WebnnDeviceType /* device_type */,
+                                      const WebnnDeviceType device_type,
                                       const logging::Logger& logger) const {
-  // TODO: Update IsOpSupportedImpl to pass GraphViewer instead of InitializedTensorSet so the implementations
-  // can ensure initializers are constant. See #19401 for details of how this update was made to the NNAPI EP.
-  // GetClipMinMax(graph_viewer, node, minValue, maxValue, logger)
   float min, max;
-  return GetClipMinMax(initializers, node, min, max, logger);
+  return GetClipMinMax(graph_viewer, node, min, max, logger);
 }
 
 void CreateClipOpBuilder(const std::string& op_type, OpBuilderRegistrations& op_registrations) {

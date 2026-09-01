@@ -9,7 +9,7 @@
 #include "core/graph/constants.h"
 #include "core/graph/contrib_ops/contrib_defs.h"
 #include "core/graph/contrib_ops/shape_inference_functions.h"
-#include "onnx/onnx-ml.pb.h" // ?
+#include "core/graph/onnx_protobuf.h"
 
 // Suppress a warning: global initializer calls a non-constexpr function 'symbol' which is from
 // ONNX_OPERATOR_SET_SCHEMA_EX macro and only happens in debug build
@@ -22,7 +22,9 @@ void RNNShapeInference(InferenceContext& ctx);
 void convTransposeShapeInference(InferenceContext& ctx);
 void convPoolShapeInference(ONNX_NAMESPACE::InferenceContext& ctx, bool use_dilation, bool require_kernel_shape,
                             int input1Idx, int input2Idx);
-void matmulShapeInference(ONNX_NAMESPACE::InferenceContext& ctx, int input1Idx, int input2Idx);
+namespace defs::math::utils {
+void MatMulShapeInference(ONNX_NAMESPACE::InferenceContext& ctx, int input1Idx, int input2Idx);
+}
 
 }  // namespace ONNX_NAMESPACE
 
@@ -162,7 +164,8 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
                "T2", OpSchema::Optional)
         .Output(0, "y", "N-D quantized output tensor. It has same shape as input 'x'.", "T2")
         .TypeConstraint("T1", {"tensor(float16)", "tensor(float)"}, "Constrain 'x', 'y_scale' to float tensors.")
-        .TypeConstraint("T2", {"tensor(int8)", "tensor(uint8)", "tensor(int16)", "tensor(uint16)"},
+        .TypeConstraint("T2", {"tensor(int8)", "tensor(uint8)", "tensor(int16)", "tensor(uint16)", "tensor(int4)",
+                               "tensor(uint4)"},
                         "Constrain 'y_zero_point' and 'y' to 8-bit and 16-bit integer tensors.")
         .SetDoc(QuantizeLinear_ver1_doc)
         .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
@@ -204,7 +207,8 @@ ONNX_MS_OPERATOR_SET_SCHEMA(DequantizeLinear, 1,
                                 .Output(0, "y", "N-D full precision output tensor. It has same shape as input 'x'.",
                                         "T2")
                                 .TypeConstraint("T1", {"tensor(int8)", "tensor(uint8)", "tensor(int16)",
-                                                       "tensor(uint16)", "tensor(int32)"},
+                                                       "tensor(uint16)", "tensor(int32)", "tensor(int4)",
+                                                       "tensor(uint4)"},
                                                 "Constrain 'x' and 'x_zero_point' to 8-bit integer tensors, "
                                                 "16-bit integer tensors, or 32-bit signed integer tensors.")
                                 .TypeConstraint("T2", {"tensor(float16)", "tensor(float)"},
@@ -400,7 +404,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .TypeConstraint("T2", {"tensor(int8)", "tensor(uint8)"}, "Constrain input B data type to 8-bit integer tensor.")
         .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
           propagateElemTypeFromInputToOutput(ctx, 0, 0);
-          ONNX_NAMESPACE::matmulShapeInference(ctx, 0, 1);
+          ONNX_NAMESPACE::defs::math::utils::MatMulShapeInference(ctx, 0, 1);
         }));
 
 ONNX_MS_OPERATOR_SET_SCHEMA(
@@ -438,7 +442,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
                         "Constrain input a_scale, b_scale and output Y data type as float tensor.")
         .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
           propagateElemTypeFromInputToOutput(ctx, 2, 0);
-          ONNX_NAMESPACE::matmulShapeInference(ctx, 0, 1);
+          ONNX_NAMESPACE::defs::math::utils::MatMulShapeInference(ctx, 0, 1);
         }));
 
 ONNX_MS_OPERATOR_SET_SCHEMA(
@@ -818,10 +822,10 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
             }
           }
 
-        if (all_lengths_known) {
-          output_shape->mutable_dim(axis)->set_dim_value(total_length);
-        }
-      }));
+          if (all_lengths_known) {
+            output_shape->mutable_dim(axis)->set_dim_value(total_length);
+          }
+        }));
 
   ONNX_MS_OPERATOR_SET_SCHEMA(QLinearWhere, 1, OpSchema()
     .SetDoc("Return elements, either from X or Y, depending on condition.")
@@ -951,7 +955,8 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
               AttributeProto::INT, static_cast<int64_t>(0))
         .Attr("do_rotary", "Whether to use rotary position embedding. Default value is 0.",
               AttributeProto::INT, OPTIONAL_VALUE)
-        .Attr("past_present_share_buffer", "Corresponding past and present are same tensor, its shape is "
+        .Attr("past_present_share_buffer",
+              "Corresponding past and present are same tensor, its shape is "
               "(2, batch_size, num_heads, max_sequence_length, head_size)",
               AttributeProto::INT, OPTIONAL_VALUE)
         .Attr("mask_filter_value",
@@ -1006,6 +1011,8 @@ QEmbedLayerNormalization is the quantized fusion of embedding layer in BERT mode
 The embedding layer takes input_ids (word IDs) and segment_ids (sentence IDs) to look up word_embedding, position_embedding,
 and segment_emedding; the embeddings are added then applied layer normalization using gamma and beta tensors. The input_ids
 and segment_ids remain int32. All embeddings, gamma, and beta tensors are converted to int8/uint8. The last input mask is optional.
+segment_ids, segment_embedding, segment_embedding_scale, and segment_embedding_zero_point must either all be provided or all
+be omitted.
 If mask is provided, mask index (that is position of first 0 in mask, or number of words will be calculated.)DOC";
 
 ONNX_MS_OPERATOR_SET_SCHEMA(
@@ -1016,21 +1023,21 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .Attr("epsilon", "The epsilon value to use to avoid division by zero.", AttributeProto::FLOAT,
               kDefaultEmbedLayerNormEpsilon)
         .Input(0, "input_ids", "2D words IDs with shape (batch_size, sequence_length)", "T1")
-        .Input(1, "segment_ids", "2D segment IDs with shape (batch_size, sequence_length)", "T1", OpSchema::Optional)
+        .Input(1, "segment_ids", "2D segment IDs with shape (batch_size, sequence_length). Part of the all-or-none segment input group.", "T1", OpSchema::Optional)
         .Input(2, "word_embedding_quant", "2D with shape (,hidden_size)", "T2")
         .Input(3, "position_embedding_quant", "2D with shape (, hidden_size)", "T2")
-        .Input(4, "segment_embedding", "2D with shape (, hidden_size)", "T2", OpSchema::Optional)
+        .Input(4, "segment_embedding", "2D with shape (, hidden_size). Part of the all-or-none segment input group.", "T2", OpSchema::Optional)
         .Input(5, "gamma_quant", "1D gamma tensor for layer normalization with shape (hidden_size)", "T2")
         .Input(6, "beta_quant", "1D beta tensor for layer normalization  with shape (hidden_size)", "T2")
         .Input(7, "mask", "Mask", "T1", OpSchema::Optional)
         .Input(8, "word_embedding_scale", "Scale for word embeddings", "T")
         .Input(9, "position_embedding_scale", "Scale for position embeddings", "T")
-        .Input(10, "segment_embedding_scale", "Scale for segment embeddings", "T", OpSchema::Optional)
+        .Input(10, "segment_embedding_scale", "Scale for segment embeddings. Part of the all-or-none segment input group.", "T", OpSchema::Optional)
         .Input(11, "gamma_scale", "Scale for 1D gamma tensor", "T")
         .Input(12, "beta_scale", "Scale for 1D beta tensor", "T")
         .Input(13, "word_embedding_zero_point", "Zero point for word embeddings", "T2")
         .Input(14, "position_embedding_zero_point", "Zero point for position embeddings", "T2")
-        .Input(15, "segment_embedding_zero_point", "Zero Point for segment embeddings", "T2", OpSchema::Optional)
+        .Input(15, "segment_embedding_zero_point", "Zero Point for segment embeddings. Part of the all-or-none segment input group.", "T2", OpSchema::Optional)
         .Input(16, "gamma_zero_point", "Zero Point for 1D gamma tensor", "T2")
         .Input(17, "beta_zero_point", "Zero Point for 1D beta tensor", "T2")
         .Output(0, "layernorm_out", "LayerNorm Output", "T")
@@ -1038,7 +1045,18 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .TypeConstraint("T1", {"tensor(int32)"}, "Constrain mask index to integer types")
         .TypeConstraint("T2", {"tensor(int8)", "tensor(uint8)"}, "Constrain input and output types to int8 tensors.")
         .TypeConstraint("T", {"tensor(float)"}, "Constrain input and output types to float32 tensors.")
-        .TypeAndShapeInferenceFunction(EmbedLayerNormalizationShapeInference));
+        .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
+          const bool has_segment_ids = ctx.getInputType(1) != nullptr;
+          if (has_segment_ids != (ctx.getInputType(4) != nullptr) ||
+              has_segment_ids != (ctx.getInputType(10) != nullptr) ||
+              has_segment_ids != (ctx.getInputType(15) != nullptr)) {
+            fail_type_inference(
+                "segment_ids, segment_embedding, segment_embedding_scale, and segment_embedding_zero_point "
+                "must either all be provided or all be omitted");
+          }
+
+          EmbedLayerNormalizationShapeInference(ctx);
+        }));
 
 ONNX_MS_OPERATOR_SET_SCHEMA(
     QuantizeWithOrder, 1,
@@ -1129,7 +1147,7 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .TypeConstraint("S", {"tensor(float)"}, "Constrain bias and scales to float32")
         .TypeAndShapeInferenceFunction([](ONNX_NAMESPACE::InferenceContext& ctx) {
           propagateElemTypeFromInputToOutput(ctx, 0, 0);
-          ONNX_NAMESPACE::matmulShapeInference(ctx, 0, 2);
+          ONNX_NAMESPACE::defs::math::utils::MatMulShapeInference(ctx, 0, 2);
         }));
 
 static const char* Attention_QOrdered_doc = R"DOC(
@@ -1142,7 +1160,7 @@ where value of each element is the end position, or valid length of actual seque
 left-side padding, mask_index has shape (2 * batch_size), where the values are the exclusive end positions followed by
 the inclusive start positions. When unidirectional is 1, and each token only attend to previous tokens. For GPT-2, both past
 and present state are optional. Present state could appear in output even when past state is not in input.
-Current version does not support past/present, relative_position_bias and qkv_hidden_sizes.
+Current version does not support past/present, attention_bias and qkv_hidden_sizes.
 TODO: Support them if needed in the future.
 )DOC";
 
@@ -1204,8 +1222,8 @@ ONNX_MS_OPERATOR_SET_SCHEMA(
         .Input(18, "past",
                "past state for key and value with shape (2, batch_size, num_heads, past_sequence_length, head_size).",
                "Q", OpSchema::Optional)
-        .Input(19, "relative_position_bias",
-               "additional add to QxK' with shape (batch_size, num_heads, sequence_length, sequence_length).", "S",
+        .Input(19, "attention_bias",
+               "additional add to QxK' with shape (batch_size or 1, num_heads or 1, sequence_length, total_sequence_length).", "S",
                OpSchema::Optional)
         .Output(0, "output", "3D output tensor with shape (batch_size, sequence_length, hidden_size)", "Q")
         .TypeConstraint("Q", {"tensor(int8)"}, "Constrain input and output types to int8 tensors.")

@@ -6,7 +6,7 @@
 #include <unordered_map>
 
 #include "core/common/common.h"
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 #include "core/providers/cuda/cuda_pch.h"
 
 namespace onnxruntime {
@@ -18,7 +18,7 @@ constexpr CudaGraphAnnotation_t kCudaGraphAnnotationSkip = -1;
 constexpr CudaGraphAnnotation_t kCudaGraphAnnotationDefault = 0;
 
 struct CudaGraphSet {
-  CudaGraphSet(){};
+  CudaGraphSet() {};
   ~CudaGraphSet();
 
   void Clear();
@@ -31,14 +31,14 @@ struct CudaGraphSet {
 };
 
 struct CUDAGraphManager {
-  CUDAGraphManager(){};
+  CUDAGraphManager() {};
   CUDAGraphManager(cudaStream_t stream);
   ~CUDAGraphManager();
 
   void SetStream(cudaStream_t stream);
   void CaptureBegin(CudaGraphAnnotation_t cuda_graph_annotation_id);
   void CaptureEnd(CudaGraphAnnotation_t cuda_graph_annotation_id);
-  Status Replay(CudaGraphAnnotation_t cuda_graph_annotation_id);
+  Status Replay(CudaGraphAnnotation_t cuda_graph_annotation_id, bool sync_status_flag = true);
 
   void Reset();
 

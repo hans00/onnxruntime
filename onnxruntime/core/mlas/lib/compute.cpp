@@ -20,29 +20,14 @@ Abstract:
 --*/
 
 #include "mlasi.h"
+#include "elementwise_constants.h"
+#include "softmax.h"
 
 //
 // Bundles the constants for use by kernels written in assembly.
 //
 
-MLAS_INTERNAL_DATA const struct {
-    float LowerRange;
-    float UpperRange;
-    float LowerRangeSumExp;
-    float UpperRangeSumExp;
-    float RoundingBias;
-    float Log2Reciprocal;
-    float Log2High;
-    float Log2Low;
-    float poly_0;
-    float poly_1;
-    float poly_2;
-    float poly_3;
-    float poly_4;
-    float poly_56;
-    int32_t MinimumExponent;
-    int32_t MaximumExponent;
-} MlasExpConstants = {
+MLAS_INTERNAL_DATA const MLAS_EXP_CONSTANTS MlasExpConstants = {
     -103.9720840454f,
     88.7762626647950f,
     -88.3762626647949f,
@@ -68,11 +53,14 @@ MLAS_INTERNAL_DATA const float MlasMinimumF32Value = std::numeric_limits<float>:
 // threads.
 //
 
+template <typename T>
 struct MLAS_SOFTMAX_WORK_BLOCK {
     ptrdiff_t ThreadCountN;
     bool LogSoftmax;
-    const float* Input;
-    float* Output;
+    bool SmoothSoftmax;
+    float Sink;
+    const T* Input;
+    T* Output;
     size_t N;
     size_t D;
 };
@@ -81,7 +69,7 @@ MLAS_FORCEINLINE
 MLAS_FLOAT32X4
 MlasComputeExpVector(
     MLAS_FLOAT32X4 Vector
-    )
+)
 /*++
 
 Routine Description:
@@ -186,7 +174,7 @@ MlasComputeExpF32Kernel(
     const float* Input,
     float* Output,
     size_t N
-    )
+)
 /*++
 
 Routine Description:
@@ -208,7 +196,6 @@ Return Value:
 --*/
 {
     while (N > 0) {
-
         MLAS_FLOAT32X4 Vector;
 
         if (N >= 4) {
@@ -228,7 +215,6 @@ Return Value:
         Vector = MlasComputeExpVector(Vector);
 
         if (N >= 4) {
-
             MlasStoreFloat32x4(Output, Vector);
 
             Input += 4;
@@ -236,7 +222,6 @@ Return Value:
             N -= 4;
 
         } else {
-
             MlasStoreLaneFloat32x4<0>(Output, Vector);
 
             Input += 1;
@@ -246,13 +231,14 @@ Return Value:
     }
 }
 
+template <>
 void
 MLASCALL
-MlasComputeExp(
+MlasComputeExp<float>(
     const float* Input,
     float* Output,
     size_t N
-    )
+)
 /*++
 
 Routine Description:
@@ -275,11 +261,25 @@ Return Value:
 
 --*/
 {
-#if defined(MLAS_TARGET_AMD64)
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_RISCV64) || defined(MLAS_USE_SVE)
     GetMlasPlatform().ComputeExpF32Kernel(Input, Output, N);
 #else
     MlasComputeExpF32Kernel(Input, Output, N);
 #endif
+}
+
+template <>
+void MLASCALL
+MlasComputeExp<MLAS_FP16>(
+    const MLAS_FP16* Input,
+    MLAS_FP16* Output,
+    size_t N
+) {
+    const auto* dispatch = GetMlasPlatform().SoftmaxDispatch;
+    if (dispatch == nullptr || dispatch->Exp_Fp16 == nullptr) {
+        MLAS_THROW_EX(std::runtime_error, "Exp_Fp16 is not supported.");
+    }
+    dispatch->Exp_Fp16(Input, Output, N);
 }
 
 MLAS_FORCEINLINE
@@ -287,7 +287,7 @@ MLAS_FLOAT32X4
 MlasComputeSumExpVector(
     MLAS_FLOAT32X4 Vector,
     MLAS_FLOAT32X4 NegativeMaximumVector
-    )
+)
 /*++
 
 Routine Description:
@@ -379,7 +379,7 @@ MlasComputeSumExpF32Kernel(
     float* Output,
     size_t N,
     const float* NegativeMaximum
-    )
+)
 /*++
 
 Routine Description:
@@ -411,7 +411,6 @@ Return Value:
     float Accumulator = 0.0f;
 
     if (N >= 4) {
-
         MLAS_FLOAT32X4 AccumulatorVector = MlasZeroFloat32x4();
 
 #if !defined(MLAS_SSE2_INTRINSICS)
@@ -426,7 +425,6 @@ Return Value:
         //
 
         while (N >= 8) {
-
             MLAS_FLOAT32X4 Vector0 = MlasLoadFloat32x4(Input);
             MLAS_FLOAT32X4 Vector1 = MlasLoadFloat32x4(Input + 4);
 
@@ -448,7 +446,6 @@ Return Value:
 #endif
 
         while (N >= 4) {
-
             MLAS_FLOAT32X4 Vector = MlasLoadFloat32x4(Input);
 
             Vector = MlasComputeSumExpVector(Vector, NegativeMaximumVector);
@@ -467,7 +464,6 @@ Return Value:
     }
 
     while (N > 0) {
-
 #if defined(MLAS_SSE2_INTRINSICS)
         // N.B. SSE2 lacks a broadcast load instruction, so avoid a shuffle and
         // use zeroes for the upper elements.
@@ -489,7 +485,6 @@ Return Value:
         Input += 1;
         N -= 1;
     }
-
     return Accumulator;
 }
 
@@ -498,7 +493,7 @@ MLASCALL
 MlasReduceMaximumF32Kernel(
     const float* Input,
     size_t N
-    )
+)
 /*++
 
 Routine Description:
@@ -521,17 +516,14 @@ Return Value:
     float Maximum = MlasMinimumF32Value;
 
     if (N >= 4) {
-
         MLAS_FLOAT32X4 MaximumVector0 = MlasBroadcastFloat32x4(Maximum);
 
         if (N >= 16) {
-
             MLAS_FLOAT32X4 MaximumVector1 = MaximumVector0;
             MLAS_FLOAT32X4 MaximumVector2 = MaximumVector0;
             MLAS_FLOAT32X4 MaximumVector3 = MaximumVector0;
 
             while (N >= 16) {
-
                 MaximumVector0 = MlasMaximumFloat32x4(MaximumVector0, MlasLoadFloat32x4(Input));
                 MaximumVector1 = MlasMaximumFloat32x4(MaximumVector1, MlasLoadFloat32x4(Input + 4));
                 MaximumVector2 = MlasMaximumFloat32x4(MaximumVector2, MlasLoadFloat32x4(Input + 8));
@@ -547,7 +539,6 @@ Return Value:
         }
 
         while (N >= 4) {
-
             MaximumVector0 = MlasMaximumFloat32x4(MaximumVector0, MlasLoadFloat32x4(Input));
 
             Input += 4;
@@ -558,13 +549,11 @@ Return Value:
     }
 
     while (N > 0) {
-
         Maximum = std::max(Maximum, *Input);
 
         Input += 1;
         N -= 1;
     }
-
     return Maximum;
 }
 
@@ -575,18 +564,16 @@ MlasReduceMinimumMaximumF32Kernel(
     float* Min,
     float* Max,
     size_t N
-    )
+)
 {
     float tmp_min = std::numeric_limits<float>::max();
     float tmp_max = std::numeric_limits<float>::lowest();
 
     if (N >= 4) {
-
         MLAS_FLOAT32X4 MaximumVector0 = MlasBroadcastFloat32x4(tmp_max);
         MLAS_FLOAT32X4 MinimumVector0 = MlasBroadcastFloat32x4(tmp_min);
 
         if (N >= 16) {
-
             MLAS_FLOAT32X4 MaximumVector1 = MaximumVector0;
             MLAS_FLOAT32X4 MaximumVector2 = MaximumVector0;
             MLAS_FLOAT32X4 MaximumVector3 = MaximumVector0;
@@ -596,7 +583,6 @@ MlasReduceMinimumMaximumF32Kernel(
             MLAS_FLOAT32X4 MinimumVector3 = MinimumVector0;
 
             while (N >= 16) {
-
                 MLAS_FLOAT32X4 InputVector0 = MlasLoadFloat32x4(Input);
                 MLAS_FLOAT32X4 InputVector1 = MlasLoadFloat32x4(Input + 4);
                 MLAS_FLOAT32X4 InputVector2 = MlasLoadFloat32x4(Input + 8);
@@ -626,7 +612,6 @@ MlasReduceMinimumMaximumF32Kernel(
         }
 
         while (N >= 4) {
-
             MLAS_FLOAT32X4 InputVector0 = MlasLoadFloat32x4(Input);
             MaximumVector0 = MlasMaximumFloat32x4(MaximumVector0, InputVector0);
 
@@ -641,7 +626,6 @@ MlasReduceMinimumMaximumF32Kernel(
     }
 
     while (N > 0) {
-
         tmp_max = std::max(tmp_max, *Input);
         tmp_min = std::min(tmp_min, *Input);
 
@@ -659,7 +643,7 @@ MlasComputeSoftmaxOutputF32Kernel(
     float* Output,
     size_t N,
     const float* Parameters
-    )
+)
 /*++
 
 Routine Description:
@@ -686,7 +670,6 @@ Return Value:
     const MLAS_FLOAT32X4 ScaleVector = MlasBroadcastFloat32x4(Scale);
 
     while (N >= 16) {
-
         MLAS_FLOAT32X4 Vector0 = MlasMultiplyFloat32x4(ScaleVector, MlasLoadFloat32x4(Output));
         MLAS_FLOAT32X4 Vector1 = MlasMultiplyFloat32x4(ScaleVector, MlasLoadFloat32x4(Output + 4));
         MLAS_FLOAT32X4 Vector2 = MlasMultiplyFloat32x4(ScaleVector, MlasLoadFloat32x4(Output + 8));
@@ -702,7 +685,6 @@ Return Value:
     }
 
     while (N >= 4) {
-
         MlasStoreFloat32x4(Output, MlasMultiplyFloat32x4(ScaleVector, MlasLoadFloat32x4(Output)));
 
         Output += 4;
@@ -710,7 +692,6 @@ Return Value:
     }
 
     while (N > 0) {
-
         *Output *= Scale;
 
         Output += 1;
@@ -725,7 +706,7 @@ MlasComputeLogSoftmaxOutputF32Kernel(
     float* Output,
     size_t N,
     const float* Parameters
-    )
+)
 /*++
 
 Routine Description:
@@ -757,7 +738,6 @@ Return Value:
     const MLAS_FLOAT32X4 LogarithmVector = MlasBroadcastFloat32x4(Logarithm);
 
     while (N >= 16) {
-
         MLAS_FLOAT32X4 Vector0 = MlasLoadFloat32x4(Input);
         MLAS_FLOAT32X4 Vector1 = MlasLoadFloat32x4(Input + 4);
         MLAS_FLOAT32X4 Vector2 = MlasLoadFloat32x4(Input + 8);
@@ -784,7 +764,6 @@ Return Value:
     }
 
     while (N >= 4) {
-
         MLAS_FLOAT32X4 Vector = MlasLoadFloat32x4(Input);
         Vector = MlasAddFloat32x4(Vector, NegativeMaximumVector);
         Vector = MlasSubtractFloat32x4(Vector, LogarithmVector);
@@ -796,7 +775,6 @@ Return Value:
     }
 
     while (N > 0) {
-
         *Output = *Input + NegativeMaximum - Logarithm;
 
         Input += 1;
@@ -805,11 +783,19 @@ Return Value:
     }
 }
 
+template <typename T>
 void
 MlasComputeSoftmaxThreaded(
     void* Context,
     ptrdiff_t Index
-    )
+);
+
+template <>
+void
+MlasComputeSoftmaxThreaded<float>(
+    void* Context,
+    ptrdiff_t Index
+)
 /*++
 
 Routine Description:
@@ -829,8 +815,8 @@ Return Value:
 
 --*/
 {
-    const auto* WorkBlock = (MLAS_SOFTMAX_WORK_BLOCK*)Context;
-
+    const auto* WorkBlock = (MLAS_SOFTMAX_WORK_BLOCK<float>*)Context;
+    
     //
     // Partition the operation along the N dimension.
     //
@@ -846,67 +832,81 @@ Return Value:
 
     const size_t D = WorkBlock->D;
     const bool LogSoftmax = WorkBlock->LogSoftmax;
+    const bool SmoothSoftmax = WorkBlock->SmoothSoftmax;
+    const float Sink = WorkBlock->Sink;
 
     const float* Input = WorkBlock->Input + n * D;
     float* Output = WorkBlock->Output + n * D;
 
+#if defined(MLAS_SSE2_INTRINSICS)
+    // TODO: Use std::hardware_constructive_interference_size
+    constexpr size_t CacheLineSize = 64;
+    constexpr size_t ElementsPerCacheLine = CacheLineSize / sizeof(float);
+#endif
+
     while (CountN > 0) {
+#if defined(MLAS_SSE2_INTRINSICS)
+        //
+        // Prefetch the next row of the input buffer.
+        //
+
+        for (size_t i = 0; i * ElementsPerCacheLine < D; i++) {
+            _mm_prefetch((char*)(Input + D) + i * CacheLineSize, _MM_HINT_T0);
+        }
+#endif
 
         //
         // Find the maximum value for the row.
         //
+        float Maximum;
 
-#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64)
-        float Maximum = GetMlasPlatform().ReduceMaximumF32Kernel(Input, D);
-#else
-        float Maximum = MlasReduceMaximumF32Kernel(Input, D);
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || defined(MLAS_USE_SVE) || defined(MLAS_TARGET_RISCV64)
+        Maximum = GetMlasPlatform().ReduceMaximumF32Kernel(Input, D);
+#else 
+        Maximum = MlasReduceMaximumF32Kernel(Input, D);
 #endif
+        if (SmoothSoftmax && Sink > Maximum) {
+            Maximum = Sink;
+        }
+
         float NegativeMaximum = -Maximum;
 
-        if (LogSoftmax) {
+        //
+        // Compute the exponential function for each element of the row (save to Temp if provided) and
+        // compute the sum of these exponential functions.
+        //
+        float* Temp = LogSoftmax ? nullptr : Output;
+        float Accumulation;
 
-            //
-            // Compute the sum of the exponential functions for the row.
-            //
-
-#if defined(MLAS_TARGET_AMD64)
-            float Accumulation = GetMlasPlatform().ComputeSumExpF32Kernel(Input, nullptr, D, &NegativeMaximum);
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_USE_SVE) || defined(MLAS_TARGET_RISCV64)
+        Accumulation = GetMlasPlatform().ComputeSumExpF32Kernel(Input, Temp, D, &NegativeMaximum);
 #else
-            float Accumulation = MlasComputeSumExpF32Kernel(Input, nullptr, D, &NegativeMaximum);
+        Accumulation = MlasComputeSumExpF32Kernel(Input, Temp, D, &NegativeMaximum);
 #endif
 
+        if (SmoothSoftmax) {
+            Accumulation += expf(Sink + NegativeMaximum);
+        }
+
+        if (LogSoftmax) {
             //
             // Compute the log softmax output.
             //
+            float Parameters[] = {NegativeMaximum, std::log(Accumulation)};
 
-            float Parameters[] = { NegativeMaximum, std::log(Accumulation)};
-
-#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64)
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || defined(MLAS_USE_SVE) || defined(MLAS_TARGET_RISCV64)
             GetMlasPlatform().ComputeLogSoftmaxOutputF32Kernel(Input, Output, D, Parameters);
-#else
+#else 
+
             MlasComputeLogSoftmaxOutputF32Kernel(Input, Output, D, Parameters);
 #endif
-
         } else {
-
-            //
-            // Compute the exponential function for each element of the row and
-            // compute the sum of these exponential functions.
-            //
-
-#if defined(MLAS_TARGET_AMD64)
-            float Accumulation = GetMlasPlatform().ComputeSumExpF32Kernel(Input, Output, D, &NegativeMaximum);
-#else
-            float Accumulation = MlasComputeSumExpF32Kernel(Input, Output, D, &NegativeMaximum);
-#endif
-
             //
             // Normalize the softmax output.
             //
+            float Parameters[] = {1.0f / Accumulation};
 
-            float Parameters[] = { 1.0f / Accumulation };
-
-#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64)
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_TARGET_LARCH64) || defined(MLAS_USE_SVE) || defined(MLAS_TARGET_RISCV64)
             GetMlasPlatform().ComputeSoftmaxOutputF32Kernel(Output, D, Parameters);
 #else
             MlasComputeSoftmaxOutputF32Kernel(Output, D, Parameters);
@@ -919,16 +919,92 @@ Return Value:
     }
 }
 
+template <>
+void
+MlasComputeSoftmaxThreaded<MLAS_FP16>(
+    void* Context,
+    ptrdiff_t Index
+)
+/*++
+
+Routine Description:
+
+    This routine is invoked from a worker thread to execute a segment of a
+    softmax or log softmax operation.
+
+Arguments:
+
+    Context - Supplies the pointer to the context for the threaded operation.
+
+    ThreadId - Supplies the current index of the threaded operation.
+
+Return Value:
+
+    None.
+
+--*/
+{
+    const auto* WorkBlock = (MLAS_SOFTMAX_WORK_BLOCK<MLAS_FP16>*)Context;
+    size_t n;
+    size_t CountN;
+    MlasPartitionWork(Index, WorkBlock->ThreadCountN, WorkBlock->N, &n, &CountN);
+
+    const size_t D = WorkBlock->D;
+    const bool LogSoftmax = WorkBlock->LogSoftmax;
+    const bool SmoothSoftmax = WorkBlock->SmoothSoftmax;
+
+    const MLAS_FP16* Input = WorkBlock->Input + n * D;
+    MLAS_FP16* Output = WorkBlock->Output + n * D;
+
+    const auto* dispatch = GetMlasPlatform().SoftmaxDispatch;
+    if (dispatch == nullptr ||
+        dispatch->ReduceMax_Fp16 == nullptr ||
+        dispatch->SumExp_Fp16 == nullptr ||
+        (LogSoftmax && dispatch->LogSoftmax_Fp16 == nullptr) ||
+        (!LogSoftmax && dispatch->Softmax_Fp16 == nullptr)) {
+        MLAS_THROW_EX(std::runtime_error, "Lacks kernels for fp16 softmax.");
+    }
+
+    while (CountN > 0) {
+        MLAS_FP16 Maximum = dispatch->ReduceMax_Fp16(Input, D);
+        MLAS_FP16 NegativeMaximum = Maximum.Negate();
+        if (SmoothSoftmax && !NegativeMaximum.IsNegative()) {
+            NegativeMaximum = MLAS_FP16::FromBits(0);
+        }
+
+        MLAS_FP16* Temp = LogSoftmax ? nullptr : Output;
+        MLAS_FP16 Accumulation = dispatch->SumExp_Fp16(Input, Temp, D, NegativeMaximum);
+        float accumulation_fp32 = Accumulation.ToFloat();
+
+        if (SmoothSoftmax) {
+            accumulation_fp32 += expf(NegativeMaximum.ToFloat());
+        }
+
+        if (LogSoftmax) {
+            dispatch->LogSoftmax_Fp16(Input, Output, D, NegativeMaximum, MLAS_FP16(std::log(accumulation_fp32)));
+        } else {
+            dispatch->Softmax_Fp16(Output, Output, D, MLAS_FP16(accumulation_fp32));
+        }
+
+        Input += D;
+        Output += D;
+        CountN--;
+    }
+}
+
+template <typename T>
 void
 MLASCALL
 MlasComputeSoftmax(
-    const float* Input,
-    float* Output,
+    const T* Input,
+    T* Output,
     size_t N,
     size_t D,
     bool LogSoftmax,
+    bool SmoothSoftmax,
+    float Sink,
     MLAS_THREADPOOL* ThreadPool
-    )
+)
 /*++
 
 Routine Description:
@@ -950,6 +1026,10 @@ Arguments:
     LogSoftmax - Supplies true if this is a log softmax operation, else false
         if this is a softmax operation.
 
+    SmoothSoftmax - Supplies true if a smooth factor is used in softmax operation.
+
+    Sink - Supplies the smooth factor to use in the softmax operation.
+
     ThreadPool - Supplies the thread pool object to use, else nullptr if the
         base library threading support should be used.
 
@@ -959,17 +1039,19 @@ Return Value:
 
 --*/
 {
-    MLAS_SOFTMAX_WORK_BLOCK WorkBlock;
+    MLAS_SOFTMAX_WORK_BLOCK<T> WorkBlock;
 
     //
     // Capture the softmax parameters to the work block.
     //
 
     WorkBlock.LogSoftmax = LogSoftmax;
+    WorkBlock.SmoothSoftmax = SmoothSoftmax;
     WorkBlock.Input = Input;
     WorkBlock.Output = Output;
     WorkBlock.N = N;
     WorkBlock.D = D;
+    WorkBlock.Sink = Sink;
 
     //
     // Compute the number of target threads given the complexity of the softmax
@@ -994,5 +1076,69 @@ Return Value:
 
     WorkBlock.ThreadCountN = ThreadCountN;
 
-    MlasExecuteThreaded(MlasComputeSoftmaxThreaded, &WorkBlock, ThreadCountN, ThreadPool);
+    MlasExecuteThreaded(MlasComputeSoftmaxThreaded<T>, &WorkBlock, ThreadCountN, ThreadPool);
+}
+
+template
+void
+MLASCALL
+MlasComputeSoftmax<float>(
+    const float* Input,
+    float* Output,
+    size_t N,
+    size_t D,
+    bool LogSoftmax,
+    bool SmoothSoftmax,
+    float Sink,
+    MLAS_THREADPOOL* ThreadPool
+);
+
+template
+void
+MLASCALL
+MlasComputeSoftmax<MLAS_FP16>(
+    const MLAS_FP16* Input,
+    MLAS_FP16* Output,
+    size_t N,
+    size_t D,
+    bool LogSoftmax,
+    bool SmoothSoftmax,
+    float Sink,
+    MLAS_THREADPOOL* ThreadPool
+);
+
+template <>
+bool
+MLASCALL
+MlasGQASupported<MLAS_FP16>(
+    CBLAS_TRANSPOSE TransA,
+    CBLAS_TRANSPOSE TransB
+) {
+    if (!MlasHGemmSupported(TransA, TransB)) {
+        return false;
+    }
+
+    const auto* softmax_dispatch = GetMlasPlatform().SoftmaxDispatch;
+    if (softmax_dispatch == nullptr ||
+        softmax_dispatch->Tanh_Fp16 == nullptr ||
+        softmax_dispatch->Softcap_Fp16 == nullptr ||
+        softmax_dispatch->SumExp_Fp16 == nullptr ||
+        softmax_dispatch->Softmax_Fp16 == nullptr ||
+        softmax_dispatch->ReduceMax_Fp16 == nullptr) {
+        return false;
+    }
+
+    return true;
+}
+
+template <>
+bool
+MLASCALL
+MlasGQASupported<float>(
+    CBLAS_TRANSPOSE TransA,
+    CBLAS_TRANSPOSE TransB
+) {
+    MLAS_UNREFERENCED_PARAMETER(TransA);
+    MLAS_UNREFERENCED_PARAMETER(TransB);
+    return true;
 }

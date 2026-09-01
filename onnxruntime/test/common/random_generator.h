@@ -8,17 +8,21 @@
 
 #include "gtest/gtest.h"
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/common/common.h"
+#include "core/common/narrow.h"
 #include "core/common/optional.h"
 #include "core/common/type_utils.h"
+#include "core/common/float16.h"
+#include "core/framework/int4.h"
+#include "core/framework/int2.h"
 #include "test/util/include/test_random_seed.h"
 
 namespace onnxruntime {
 namespace test {
 
 namespace detail {
-inline int64_t SizeFromDims(gsl::span<const int64_t> dims, gsl::span<const int64_t> strides = {}) {
+inline size_t SizeFromDims(gsl::span<const int64_t> dims, gsl::span<const int64_t> strides = {}) {
   int64_t size = 1;
   if (strides.empty()) {
     size = std::accumulate(dims.begin(), dims.end(), static_cast<int64_t>(1), std::multiplies<int64_t>{});
@@ -33,8 +37,7 @@ inline int64_t SizeFromDims(gsl::span<const int64_t> dims, gsl::span<const int64
     }
   }
 
-  ORT_ENFORCE(size >= 0);
-  return size;
+  return narrow<size_t>(size);
 }
 }  // namespace detail
 
@@ -70,7 +73,7 @@ class RandomValueGenerator {
   // Random values generated are in the range [min, max).
   template <typename TFloat16>
   typename std::enable_if<
-      std::is_same_v<TFloat16, MLFloat16>,
+      std::is_same_v<TFloat16, MLFloat16> || std::is_same_v<TFloat16, BFloat16>,
       std::vector<TFloat16>>::type
   Uniform(gsl::span<const int64_t> dims, float min, float max) {
     std::vector<TFloat16> val(detail::SizeFromDims(dims));
@@ -106,6 +109,38 @@ class RandomValueGenerator {
       val[i] = static_cast<TByte>(distribution(generator_));
     }
     return val;
+  }
+
+  template <typename TInt4>
+  typename std::enable_if<
+      std::is_same_v<TInt4, Int4x2> || std::is_same_v<TInt4, UInt4x2>,
+      std::vector<TInt4>>::type
+  Uniform(gsl::span<const int64_t> dims, TInt4 min, TInt4 max) {
+    using UnpackedType = typename TInt4::UnpackedType;
+    std::vector<UnpackedType> data_int8 = Uniform<UnpackedType>(dims, min.GetElem(0), max.GetElem(0));
+    std::vector<TInt4> data(TInt4::CalcNumInt4Pairs(data_int8.size()));
+    for (size_t i = 0; i < data_int8.size(); i++) {
+      size_t r = i >> 1;
+      size_t c = i & 0x1;
+      data[r].SetElem(c, data_int8[i]);
+    }
+    return data;
+  }
+
+  template <typename TInt2>
+  typename std::enable_if<
+      std::is_same_v<TInt2, Int2x4> || std::is_same_v<TInt2, UInt2x4>,
+      std::vector<TInt2>>::type
+  Uniform(gsl::span<const int64_t> dims, TInt2 min, TInt2 max) {
+    using UnpackedType = typename TInt2::UnpackedType;
+    std::vector<UnpackedType> data_int8 = Uniform<UnpackedType>(dims, min.GetElem(0), max.GetElem(0));
+    std::vector<TInt2> data(TInt2::CalcNumInt2Quads(data_int8.size()));
+    for (size_t i = 0; i < data_int8.size(); i++) {
+      size_t r = i >> 2;
+      size_t c = i & 0x3;
+      data[r].SetElem(c, data_int8[i]);
+    }
+    return data;
   }
 
   // Gaussian distribution for float

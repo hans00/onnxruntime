@@ -24,10 +24,10 @@ extern OrtEnv* env;
 
 class Allocs : public IExecutionProvider {
  private:
-  std::shared_ptr<CPUAllocator> alloc = std::make_shared<CPUAllocator>();
+  AllocatorPtr alloc = CPUAllocator::DefaultInstance();
 
  public:
-  Allocs() : IExecutionProvider("fake"){};
+  Allocs() : IExecutionProvider("fake") {};
   AllocatorPtr GetAllocator(OrtMemType) const {
     return alloc;
   }

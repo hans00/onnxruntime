@@ -13,7 +13,7 @@ import sys
 import tempfile
 
 from c.assemble_c_pod_package import assemble_c_pod_package
-from package_assembly_utils import PackageVariant, gen_file_from_template, get_ort_version
+from package_assembly_utils import gen_file_from_template, get_ort_version
 
 SCRIPT_PATH = pathlib.Path(__file__).resolve(strict=True)
 REPO_DIR = SCRIPT_PATH.parents[4]
@@ -81,7 +81,6 @@ def _test_apple_packages(args):
             framework_info_file=args.framework_info_file,
             public_headers_dir=public_headers_dir,
             framework_dir=framework_dir,
-            package_variant=PackageVariant[args.variant],
         )
 
         # move podspec out to target_proj_path first
@@ -89,8 +88,9 @@ def _test_apple_packages(args):
 
         # create a zip file contains the framework
         zip_file_path = local_pods_dir / f"{pod_name}.zip"
-        # shutil.make_archive require target file as full path without extension
-        shutil.make_archive(zip_file_path.with_suffix(""), "zip", root_dir=local_pods_dir)
+
+        # shutil.make_archive doesn't preserve symlinks. we know this is running on macOS so use zip
+        subprocess.run(["zip", "-r", "-y", str(zip_file_path), "."], cwd=local_pods_dir, check=True)
 
         # update the podspec to point to the local framework zip file
         with open(podspec) as file:
@@ -195,7 +195,7 @@ def _test_apple_packages(args):
                     cwd=target_proj_path,
                 )
 
-            if PackageVariant[args.variant] != PackageVariant.Mobile and not args.skip_macos_test:
+            if not args.skip_macos_test:
                 subprocess.run(
                     [
                         "xcrun",
@@ -206,7 +206,7 @@ def _test_apple_packages(args):
                         "-scheme",
                         "macos_package_test",
                         "-destination",
-                        "platform=macos",
+                        "platform=macOS",
                     ],
                     shell=False,
                     check=True,
@@ -236,13 +236,6 @@ def parse_args():
 
     parser.add_argument(
         "--c_framework_dir", type=pathlib.Path, required=True, help="Provide the parent directory for C/C++ framework"
-    )
-
-    parser.add_argument(
-        "--variant",
-        choices=PackageVariant.all_variant_names(),
-        required=True,
-        help="Pod package variant.",
     )
 
     parser.add_argument(

@@ -29,7 +29,6 @@ class Gemm : protected GemmBase, public XnnpackKernel {
  private:
   const Tensor* B_{nullptr};
 
-  int64_t M_ = -1;
   int64_t K_ = -1;
   int64_t N_ = -1;
 
@@ -41,6 +40,8 @@ class Gemm : protected GemmBase, public XnnpackKernel {
 
   float alpha_;
   float beta_;
+
+  OpComputeType op_compute_type_ = OpComputeType::op_compute_type_invalid;
 };
 
 }  // namespace xnnpack

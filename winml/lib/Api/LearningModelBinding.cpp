@@ -30,7 +30,7 @@ static winml::ILearningModelFeatureDescriptor FindValidBinding(
     uint32_t size;
     WINML_THROW_IF_FAILED(descriptor_native->GetName(&feature_name, &size));
 
-    // Case insensetive comparison of onnx name in feature descriptor, and passed in name
+    // Case insensitive comparison of onnx name in feature descriptor, and passed in name
     if (_wcsicmp(feature_name, name.c_str()) == 0) {
       return descriptor;
     }
@@ -509,7 +509,8 @@ HRESULT LearningModelBinding::BindInput(const std::string& name, winrt::com_ptr<
 
   auto engine = m_session.as<LearningModelSession>()->GetEngine();
   winrt::com_ptr<_winml::IValue> device_value;
-  WINML_THROW_IF_FAILED(engine->CreateOneInputAcrossDevices(name.c_str(), value.get(), device_value.put())
+  WINML_THROW_IF_FAILED(
+    engine->CreateOneInputAcrossDevices(name.c_str(), value.get(), device_value.put())
   );  // an input will always be copied on device mismatch
 
   if (exists) {

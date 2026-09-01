@@ -5,10 +5,12 @@
 
 #include <memory>
 #include <vector>
-
 #include "core/providers/cuda/cuda_kernel.h"
 #include "contrib_ops/cuda/bert/tensorrt_fused_multihead_attention/mha_runner.h"
 #include "contrib_ops/cpu/bert/attention_common.h"
+#include "contrib_ops/cpu/bert/attention_parameters.h"
+#include "contrib_ops/cuda/bert/attention_kernel_options.h"
+#include "contrib_ops/cuda/bert/packed_attention_workspace.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -16,15 +18,23 @@ namespace cuda {
 
 using namespace onnxruntime::cuda;
 
+PackedAttentionShape MakePackedAttentionShape(const TensorShape& shape) noexcept;
+
+Status PackedAttentionWorkspaceStatusToStatus(PackedAttentionWorkspaceStatus status);
+
 template <typename T>
-class TrtFusedAttention {
+class TrtFusedAttention : public CudaKernel {
  public:
-  TrtFusedAttention();
+  TrtFusedAttention(const OpKernelInfo& info);
 
  protected:
-  MHARunner* GetFusedRunner(const cudaDeviceProp& device_prop, const PackedAttentionParameters& parameters) const;
+  MHARunner* GetFusedRunner(const cudaDeviceProp& device_prop,
+                            bool has_attention_bias,
+                            const PackedAttentionParameters& parameters) const;
 
  protected:
+  const AttentionKernelOptions* kernel_options_;
+
   bool disable_fused_runner_;
   bool enable_trt_flash_attention_;
   mutable std::unique_ptr<MHARunner> fused_fp16_runner_;
@@ -32,7 +42,7 @@ class TrtFusedAttention {
 };
 
 template <typename T>
-class PackedAttention final : public TrtFusedAttention<T>, public CudaKernel {
+class PackedAttention final : public TrtFusedAttention<T> {
  public:
   PackedAttention(const OpKernelInfo& info);
   Status ComputeInternal(OpKernelContext* context) const override;
@@ -43,16 +53,17 @@ class PackedAttention final : public TrtFusedAttention<T>, public CudaKernel {
                      const TensorShape& bias_shape,
                      const TensorShape& packing_token_offset_shape,
                      const TensorShape& cu_seq_len_shape,
-                     const Tensor* relative_position_bias,
-                     PackedAttentionParameters& parameters) const;
+                     const Tensor* attention_bias,
+                     PackedAttentionParameters& parameters,
+                     PackedAttentionProblem& problem) const;
 
-  int GetNumHeads() const { return num_heads_; }
+  int64_t GetNumHeads() const { return num_heads_; }
   float GetScale() const { return scale_; }
 
  private:
-  int num_heads_;                          // number of attention heads
-  float scale_;                            // scale for softmax. Default is 0.0f, which will be replaced by 1/sqrt(num_heads) later
-  std::vector<int64_t> qkv_hidden_sizes_;  // Q, K, V hidden sizes parsed from the qkv_hidden_sizes attribute.
+  int64_t num_heads_;                      // number of attention heads
+  float scale_;                            // scale for softmax
+  std::vector<int64_t> qkv_hidden_sizes_;  // Q, K, V hidden sizes
 };
 
 }  // namespace cuda

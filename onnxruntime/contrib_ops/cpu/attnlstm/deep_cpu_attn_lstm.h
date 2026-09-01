@@ -10,6 +10,7 @@
 #include "core/common/narrow.h"
 #include "core/framework/op_kernel.h"
 #include "core/providers/cpu/rnn/rnn_helpers.h"
+#include "core/providers/cpu/mlas_backend_kernel_selector_config_utils.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -19,7 +20,7 @@ using onnxruntime::rnn::detail::Direction;
 using onnxruntime::rnn::detail::MakeDirection;
 
 // The class represents DeepCPU implementation of a long short term memory (LSTM) plus a Bahdanau Attention wraper.
-// The equivilent python usage could be checked int the corresponding op test directory, attention_lstm_data_gen.py.
+// The equivalent python usage could be checked int the corresponding op test directory, attention_lstm_data_gen.py.
 // Also please note that detail implementation re-used lot of code from current ONNXRuntime LSTM operator, refactor
 // is needed in future if this is become part of ONNX.
 class DeepCpuAttnLstmOp final : public OpKernel {
@@ -58,6 +59,8 @@ class DeepCpuAttnLstmOp final : public OpKernel {
     activation_funcs_ = ActivationFuncs(activation_func_names,
                                         activation_func_alphas,
                                         activation_func_betas);
+
+    SetupMlasBackendKernelSelectorFromConfigOptions(mlas_backend_kernel_selector_config_, info.GetConfigOptions());
   }
 
   Status Compute(OpKernelContext* context) const override;
@@ -92,6 +95,8 @@ class DeepCpuAttnLstmOp final : public OpKernel {
   bool input_forget_ = false;
 
   ActivationFuncs activation_funcs_;
+
+  MLAS_BACKEND_KERNEL_SELECTOR_CONFIG mlas_backend_kernel_selector_config_;
 };
 
 }  // namespace contrib

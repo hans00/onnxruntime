@@ -11,6 +11,7 @@ import os
 import time
 
 import numpy as np
+import packaging.version as pv
 import torch
 from benchmark_helper import setup_logger
 from dist_settings import get_rank, get_size
@@ -20,19 +21,22 @@ from llama_inputs import (
     get_merged_sample_with_past_kv_inputs,
     get_sample_inputs,
     get_sample_with_past_kv_inputs,
+    verify_ort_inputs,
 )
 from llama_torch import setup_torch_model
+from models.torch_export_patches.cache_helper import make_dynamic_cache
 from transformers import AutoConfig
+from transformers import __version__ as transformers_version
+from transformers.cache_utils import DynamicCache
 
 import onnxruntime as ort
 
 logger = logging.getLogger("")
 
 
-def get_sequence_lengths(args: argparse.Namespace):
+def get_sequence_lengths(args: argparse.Namespace, config: AutoConfig):
     past_sequence_length, curr_sequence_length = (8, 1) if args.use_past_kv else (0, 8)
-    temp_name = args.model_name.lower().replace("-", "").replace("_", "")
-    max_sequence_length = 16384 if "codellama" in temp_name else 4096 if "llama2" in temp_name else 2048
+    max_sequence_length = config.max_position_embeddings
     return past_sequence_length, curr_sequence_length, max_sequence_length
 
 
@@ -40,7 +44,7 @@ def get_inputs(args: argparse.Namespace, config: AutoConfig):
     # Dummy values for parity
     world_size = get_size()
     batch_size = 2
-    past_sequence_length, sequence_length, max_sequence_length = get_sequence_lengths(args)
+    past_sequence_length, sequence_length, max_sequence_length = get_sequence_lengths(args, config)
 
     if args.merged:
         inputs = get_merged_sample_with_past_kv_inputs(
@@ -51,7 +55,7 @@ def get_inputs(args: argparse.Namespace, config: AutoConfig):
             past_seq_len=past_sequence_length,
             max_seq_len=max_sequence_length,
             use_fp16=args.use_fp16,
-            use_gqa=args.use_gqa,
+            use_buffer_share=args.use_buffer_share,
             return_dict=True,
             world_size=world_size,
         )
@@ -71,6 +75,28 @@ def get_inputs(args: argparse.Namespace, config: AutoConfig):
     return inputs
 
 
+def torch_deepcopy(value):
+    if isinstance(value, (int, float, str)):
+        return value
+    if isinstance(value, tuple):
+        return tuple(torch_deepcopy(v) for v in value)
+    if isinstance(value, list):
+        return [torch_deepcopy(v) for v in value]
+    if isinstance(value, set):
+        return {torch_deepcopy(v) for v in value}
+    if isinstance(value, dict):
+        return {k: torch_deepcopy(v) for k, v in value.items()}
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    if hasattr(value, "clone"):
+        return value.clone()
+    if isinstance(value, DynamicCache):
+        return make_dynamic_cache(torch_deepcopy(list(zip(value.key_cache, value.value_cache, strict=False))))
+    # We should have a code using serialization, deserialization assuming a model
+    # cannot be exported without them.
+    raise NotImplementedError(f"torch_deepcopy not implemented for type {type(value)}")
+
+
 def verify_parity(
     args: argparse.Namespace,
     location: str,
@@ -79,7 +105,7 @@ def verify_parity(
     pytorch_model: None | torch.nn.Module = None,
     config: None | AutoConfig = None,
 ):
-    # If it's running in a machine which GPU memory < 36GB, it should unload the llama in GPU in time and free the GPU memory for ORT.
+    # If it's running in a machine where GPU memory < 36GB, it should unload the model in GPU in time and free the GPU memory for ORT.
     py_model = pytorch_model
     if py_model is None:
         config, py_model = setup_torch_model(
@@ -92,11 +118,19 @@ def verify_parity(
 
     inputs = get_inputs(args, config)
 
+    if "past_key_values" in inputs and pv.Version(transformers_version) >= pv.Version("4.45"):
+        # Using DynamicCache
+        inputs["past_key_values"] = make_dynamic_cache(inputs["past_key_values"])
+
     # Run inference with PyTorch
+    inputs_after_deepcopy = torch_deepcopy(inputs)
     if args.execution_provider != "cpu":
         torch.cuda.synchronize()
     start_time = time.time()
-    pt_outputs = py_model(**inputs).logits.detach().cpu().numpy()
+    # If there is a cache in the inputs, we need to make a copy as the model modifies them inplace.
+    # DynamicCache inherits from torch.nn.Module in some version of transformers.
+    # We need to make the copy manually.
+    pt_outputs = py_model(**inputs_after_deepcopy).logits.detach().cpu().numpy()
     if args.execution_provider != "cpu":
         torch.cuda.synchronize()
     end_time = time.time()
@@ -107,14 +141,12 @@ def verify_parity(
         torch.cuda.empty_cache()
 
     # Run inference with ORT
-    past_sequence_length, _, max_sequence_length = get_sequence_lengths(args)
+    past_sequence_length, _, max_sequence_length = get_sequence_lengths(args, config)
     inputs = convert_inputs_for_ort(
         inputs,
-        use_gqa=args.use_gqa,
+        use_buffer_share=args.use_buffer_share,
         past_seq_len=past_sequence_length,
         max_seq_len=max_sequence_length,
-        device=args.execution_provider,
-        device_id=int(args.rank),
     )
 
     ep = f"{args.execution_provider.upper()}ExecutionProvider"
@@ -125,16 +157,17 @@ def verify_parity(
         sess_options=ort.SessionOptions(),
         providers=[ep],
     )
+    inputs = verify_ort_inputs(ort_model, inputs)
 
     # Add IO bindings for non-CPU execution providers
     if args.execution_provider != "cpu":
         io_binding, kv_cache_ortvalues = add_io_bindings_as_ortvalues(
             ort_model,
-            inputs,
-            args.execution_provider,
-            int(args.rank),
-            args.use_gqa,
-            kv_cache_ortvalues,
+            ort_inputs=inputs,
+            device=args.execution_provider,
+            device_id=int(args.rank),
+            use_buffer_share=args.use_buffer_share,
+            kv_cache_ortvalues=kv_cache_ortvalues,
         )
 
         io_binding.synchronize_inputs()
@@ -195,7 +228,7 @@ def get_args(argv: list[str]):
         "--execution_provider",
         required=False,
         default="cpu",
-        choices=["cpu", "cuda", "rocm"],
+        choices=["cpu", "cuda"],
         help="Execution provider to verify parity with",
     )
 
@@ -217,11 +250,11 @@ def get_args(argv: list[str]):
 
     parser.add_argument(
         "-g",
-        "--use_gqa",
+        "--use_buffer_share",
         action="store_true",
-        help="Use if model has GroupQueryAttention",
+        help="Use if model has GroupQueryAttention and you want to enable past-present buffer sharing",
     )
-    parser.set_defaults(use_gqa=False)
+    parser.set_defaults(use_buffer_share=False)
 
     parser.add_argument(
         "--merged",

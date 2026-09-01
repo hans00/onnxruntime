@@ -21,8 +21,8 @@ static const auto c_enable_debug_output = L"EnableDebugOutput";
 namespace guid_details {
 // This GUID is to be used for delimiting ML-related categories of capturable work.
 // {D113B493-BBA2-4993-8608-D706A73B91CE}
-struct __declspec(uuid("D113B493-BBA2-4993-8608-D706A73B91CE")) __declspec(novtable
-) WINML_PIX_EVAL_CAPTURABLE_WORK_GUID {};
+struct __declspec(uuid("D113B493-BBA2-4993-8608-D706A73B91CE"))
+__declspec(novtable) WINML_PIX_EVAL_CAPTURABLE_WORK_GUID {};
 }  // namespace guid_details
 static const GUID WINML_PIX_EVAL_CAPTURABLE_WORK_GUID = __uuidof(guid_details::WINML_PIX_EVAL_CAPTURABLE_WORK_GUID);
 
@@ -37,13 +37,15 @@ LearningModelSession::LearningModelSession(_winml::IEngine* engine)
 }
 
 LearningModelSession::LearningModelSession(winml::LearningModel const& model) try
-  : LearningModelSession(model, make<LearningModelDevice>(LearningModelDeviceKind::Default)) {}
+  : LearningModelSession(model, make<LearningModelDevice>(LearningModelDeviceKind::Default)) {
+}
 WINML_CATCH_ALL
 
 LearningModelSession::LearningModelSession(
   winml::LearningModel const& model, winml::LearningModelDevice const& deviceToRunOn
 ) try
-  : LearningModelSession(model, deviceToRunOn, nullptr) {}
+  : LearningModelSession(model, deviceToRunOn, nullptr) {
+}
 WINML_CATCH_ALL
 
 LearningModelSession::LearningModelSession(
@@ -107,7 +109,8 @@ void LearningModelSession::Initialize() {
   WINML_THROW_IF_FAILED(engine_factory_->CreateEngineBuilder(engine_builder.put()));
 
   if (device_impl->IsCpuDevice() == false) {
-    WINML_THROW_IF_FAILED(engine_builder->SetD3D12Resources(device_impl->GetD3DDevice(), device_impl->GetDeviceQueue())
+    WINML_THROW_IF_FAILED(
+      engine_builder->SetD3D12Resources(device_impl->GetD3DDevice(), device_impl->GetDeviceQueue())
     );
     WINML_THROW_IF_FAILED(engine_builder->SetMetacommandsEnabled(device_impl->MetacommandsEnabled()));
   }
@@ -125,7 +128,8 @@ void LearningModelSession::Initialize() {
 
     // Make onnxruntime apply named dimension overrides, if any
     if (session_options_impl && session_options_impl->NamedDimensionOverrides().Size() > 0) {
-      WINML_THROW_IF_FAILED(engine_builder->SetNamedDimensionOverrides(session_options_impl->NamedDimensionOverrides())
+      WINML_THROW_IF_FAILED(
+        engine_builder->SetNamedDimensionOverrides(session_options_impl->NamedDimensionOverrides())
       );
     }
 
@@ -244,10 +248,9 @@ uint64_t LearningModelSession::Run(winrt::com_ptr<winmlp::LearningModelBinding> 
   auto& output_names = binding_impl->GetOutputNames();
   std::vector<const char*> output_names_raw;
   std::transform(
-    std::begin(output_names),
-    std::end(output_names),
-    std::back_inserter(output_names_raw),
-    [&](auto& name) { return name.c_str(); }
+    std::begin(output_names), std::end(output_names), std::back_inserter(output_names_raw), [&](auto& name) {
+      return name.c_str();
+    }
   );
 
   auto outputs = binding_impl->GetOutputs();

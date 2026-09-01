@@ -7,5 +7,10 @@
 
 namespace onnxruntime {
 
-void GraphViewerToProto(const GraphViewer& graph_view, ONNX_NAMESPACE::GraphProto& graph_proto, bool include_initializer, bool include_outer_scope_args);
+void GraphViewerToProto(const GraphViewer& graph_view,
+                        ONNX_NAMESPACE::GraphProto& graph_proto,
+                        bool include_initializer,
+                        bool include_outer_scope_args,
+                        ExecutionOrder order = ExecutionOrder::DEFAULT,
+                        bool include_initializer_data = true);
 }  // namespace onnxruntime

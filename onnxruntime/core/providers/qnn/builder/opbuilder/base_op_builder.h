@@ -3,10 +3,11 @@
 
 #pragma once
 
-#include "core/providers/shared/utils/utils.h"
+#include "core/providers/qnn/ort_api.h"
+#include "core/providers/qnn/builder/qnn_utils.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder.h"
-#include "core/framework/allocator.h"
+#include "core/providers/qnn/builder/qnn_quant_params_wrapper.h"
 
 #include "QnnOpDef.h"
 
@@ -57,7 +58,7 @@ class BaseOpBuilder : public IOpBuilder {
                                           const std::vector<std::string>& input_names,
                                           size_t output_index,
                                           Qnn_DataType_t qnn_data_type,
-                                          Qnn_QuantizeParams_t& quant_param) const ORT_MUST_USE_RESULT {
+                                          QnnQuantParamsWrapper& quant_param) const ORT_MUST_USE_RESULT {
     // Do nothing by default. Op builders like Split implement this function to override output quant params.
     ORT_UNUSED_PARAMETER(qnn_model_wrapper);
     ORT_UNUSED_PARAMETER(node_unit);
@@ -69,11 +70,27 @@ class BaseOpBuilder : public IOpBuilder {
     return Status::OK();
   }
 
+  Status ProcessDataTypes(QnnModelWrapper& qnn_model_wrapper,
+                          const NodeUnit& node_unit) const ORT_MUST_USE_RESULT;
+
+  virtual Status CheckCpuDataTypes(const std::vector<Qnn_DataType_t>,
+                                   const std::vector<Qnn_DataType_t>) const ORT_MUST_USE_RESULT;
+
+  virtual Status CheckHtpDataTypes(const std::vector<Qnn_DataType_t>,
+                                   const std::vector<Qnn_DataType_t>) const ORT_MUST_USE_RESULT;
+
+  virtual Status CheckGpuDataTypes(const std::vector<Qnn_DataType_t>,
+                                   const std::vector<Qnn_DataType_t>) const ORT_MUST_USE_RESULT;
+
   virtual Status ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
                                const NodeUnit& node_unit,
                                const logging::Logger& logger,
                                std::vector<std::string>& input_names,
                                bool do_op_validation = false) const ORT_MUST_USE_RESULT;
+
+  Status ProcessInt64Tensors(QnnModelWrapper& qnn_model_wrapper,
+                             const NodeUnit& node_unit,
+                             std::vector<std::string>& input_names) const ORT_MUST_USE_RESULT;
 
   virtual Status ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wrapper,
                                              const NodeUnit& node_unit,
@@ -94,14 +111,13 @@ class BaseOpBuilder : public IOpBuilder {
                       const logging::Logger& logger,
                       std::vector<std::string>& input_names) const ORT_MUST_USE_RESULT;
 
-  const std::string& GetNodeName(const NodeUnit& node_unit) const {
-    const std::string& node_name(node_unit.Name());
-    if (node_name.empty()) {
-      return node_unit.Outputs()[0].node_arg.Name();
-    }
-
-    return node_name;
-  }
+  Status AddZeroBiasInput(QnnModelWrapper& qnn_model_wrapper,
+                          const QnnQuantParamsWrapper& input0_qparams,
+                          const QnnQuantParamsWrapper& input1_qparams,
+                          std::vector<uint32_t>&& bias_shape,
+                          const std::string& bias_name,
+                          const logging::Logger& logger,
+                          std::vector<std::string>& input_names) const ORT_MUST_USE_RESULT;
 
   Status SetOutputQParamEqualToInputIfNearlyEqual(QnnModelWrapper& qnn_model_wrapper,
                                                   const NodeUnit& node_unit,
@@ -110,10 +126,9 @@ class BaseOpBuilder : public IOpBuilder {
                                                   size_t input_index,
                                                   size_t output_index,
                                                   Qnn_DataType_t qnn_data_type,
-                                                  Qnn_QuantizeParams_t& quant_param) const ORT_MUST_USE_RESULT;
+                                                  QnnQuantParamsWrapper& quant_param) const ORT_MUST_USE_RESULT;
 
   static const std::string& GetQnnOpType(const std::string& onnx_op_type) {
-    // TODO: Use QNN operator names defined in "QnnOpDef.h"
     static const std::unordered_map<std::string, std::string> onnx_op_type_to_qnn_op_type = {
         {"Add", QNN_OP_ELEMENT_WISE_ADD},
         {"Mul", QNN_OP_ELEMENT_WISE_MULTIPLY},
@@ -131,11 +146,13 @@ class BaseOpBuilder : public IOpBuilder {
         {"Exp", QNN_OP_ELEMENT_WISE_EXP},
         {"Floor", QNN_OP_ELEMENT_WISE_FLOOR},
         {"Gather", QNN_OP_GATHER},
+        {"GatherElements", QNN_OP_GATHER_ELEMENTS},
         {"Greater", QNN_OP_ELEMENT_WISE_GREATER},
         {"GreaterOrEqual", QNN_OP_ELEMENT_WISE_GREATER_EQUAL},
         {"Less", QNN_OP_ELEMENT_WISE_LESS},
         {"LessOrEqual", QNN_OP_ELEMENT_WISE_LESS_EQUAL},
         {"Log", QNN_OP_ELEMENT_WISE_LOG},
+        {"LSTM", QNN_OP_LSTM},
         {"Max", QNN_OP_ELEMENT_WISE_MAXIMUM},
         {"Min", QNN_OP_ELEMENT_WISE_MINIMUM},
         {"Neg", QNN_OP_ELEMENT_WISE_NEG},
@@ -151,6 +168,7 @@ class BaseOpBuilder : public IOpBuilder {
         {"ReduceSum", QNN_OP_REDUCE_SUM},
         {"Round", QNN_OP_ELEMENT_WISE_ROUND},
         {"Where", QNN_OP_ELEMENT_WISE_SELECT},
+        {"ScatterND", QNN_OP_SCATTER_ND},
         {"Sigmoid", QNN_OP_SIGMOID},
         {"Sin", QNN_OP_ELEMENT_WISE_SIN},
         {"Slice", QNN_OP_STRIDED_SLICE},
@@ -158,6 +176,7 @@ class BaseOpBuilder : public IOpBuilder {
         {"Softmax", QNN_OP_SOFTMAX},
         {"Sqrt", QNN_OP_ELEMENT_WISE_SQUARE_ROOT},
         {"Sub", QNN_OP_ELEMENT_WISE_SUBTRACT},
+        {"Sum", QNN_OP_ELEMENT_WISE_ADD},
         {"Tanh", QNN_OP_TANH},
         {"Transpose", QNN_OP_TRANSPOSE},
         {"GridSample", QNN_OP_GRID_SAMPLE},
@@ -172,6 +191,7 @@ class BaseOpBuilder : public IOpBuilder {
         {"Relu", QNN_OP_RELU},
         {"Gelu", QNN_OP_GELU},
 
+        {"HardSigmoid", QNN_OP_ELEMENT_WISE_NEURON},
         {"HardSwish", QNN_OP_HARD_SWISH},
         {"DepthToSpace", QNN_OP_DEPTH_TO_SPACE},
         {"SpaceToDepth", QNN_OP_SPACE_TO_DEPTH},
@@ -186,12 +206,14 @@ class BaseOpBuilder : public IOpBuilder {
 
         {"Reshape", QNN_OP_RESHAPE},
         {"Resize", QNN_OP_RESIZE},
+        {"Upsample", QNN_OP_RESIZE},
         {"Flatten", QNN_OP_RESHAPE},
         {"Squeeze", QNN_OP_RESHAPE},
         {"Unsqueeze", QNN_OP_RESHAPE},
 
         {"LogSoftmax", QNN_OP_LOG_SOFTMAX},
         {"Concat", QNN_OP_CONCAT},
+        {"CumSum", QNN_OP_CUMULATIVE_SUM},
 
         {"Gemm", QNN_OP_FULLY_CONNECTED},
 
@@ -202,10 +224,13 @@ class BaseOpBuilder : public IOpBuilder {
         {"InstanceNormalization", QNN_OP_INSTANCE_NORM},
         {"BatchNormalization", QNN_OP_BATCHNORM},
         {"LayerNormalization", QNN_OP_LAYER_NORM},
+        {"RMSNormalization", QNN_OP_RMS_NORM},
 
         {"LRN", QNN_OP_LRN},
 
         {"Pad", QNN_OP_PAD},
+
+        {"ScatterElements", QNN_OP_SCATTER_ELEMENTS},
 
         {"Expand", QNN_OP_ELEMENT_WISE_MULTIPLY}};
     auto it = onnx_op_type_to_qnn_op_type.find(onnx_op_type);
@@ -213,68 +238,8 @@ class BaseOpBuilder : public IOpBuilder {
     return it->second;
   }
 
-  // NCHW shape to channel last
-  Status NchwShapeToNhwc(const std::vector<uint32_t>& nchw_shape, std::vector<uint32_t>& nhwc_shape) const {
-    ORT_ENFORCE(nchw_shape.size() == 4, "shape should have 4 dimension NCHW.");
-    nhwc_shape[0] = nchw_shape[0];
-    nhwc_shape[1] = nchw_shape[2];
-    nhwc_shape[2] = nchw_shape[3];
-    nhwc_shape[3] = nchw_shape[1];
-
-    return Status::OK();
-  }
-
-  // NCHW shape to HWCN shape, required for Conv weight
-  Status NchwShapeToHwcn(const std::vector<uint32_t>& nchw_shape, std::vector<uint32_t>& hwcn_shape) const {
-    ORT_ENFORCE(nchw_shape.size() == 4, "shape should have 4 dimension NCHW.");
-    hwcn_shape[0] = nchw_shape[2];
-    hwcn_shape[1] = nchw_shape[3];
-    hwcn_shape[2] = nchw_shape[1];
-    hwcn_shape[3] = nchw_shape[0];
-
-    return Status::OK();
-  }
-
-  // CNHW shape to HWCN shape, required for Conv weight
-  Status CnhwShapeToHwcn(const std::vector<uint32_t>& cnhw_shape, std::vector<uint32_t>& hwcn_shape) const {
-    ORT_ENFORCE(cnhw_shape.size() == 4, "shape should have 4 dimension CNHW.");
-    hwcn_shape[0] = cnhw_shape[2];
-    hwcn_shape[1] = cnhw_shape[3];
-    hwcn_shape[2] = cnhw_shape[0];
-    hwcn_shape[3] = cnhw_shape[1];
-
-    return Status::OK();
-  }
-  Status TransposeInitializer(const QnnModelWrapper& qnn_model_wrapper,
-                              const onnx::TensorProto& initializer,
-                              const std::vector<size_t>& perm,
-                              std::vector<uint8_t>& transposed_data) const;
-
-  Status TransposeFromNchwToHwcn(const QnnModelWrapper& qnn_model_wrapper,
-                                 const onnx::TensorProto& initializer,
-                                 std::vector<uint8_t>& transposed_data) const {
-    return TransposeInitializer(qnn_model_wrapper, initializer, nchw2hwcn_perm, transposed_data);
-  }
-
-  Status TransposeFromCnhwToHwcn(const QnnModelWrapper& qnn_model_wrapper,
-                                 const onnx::TensorProto& initializer,
-                                 std::vector<uint8_t>& transposed_data) const {
-    return TransposeInitializer(qnn_model_wrapper, initializer, cnhw2hwcn_perm, transposed_data);
-  }
-
-  Status TwoDimensionTranspose(const QnnModelWrapper& qnn_model_wrapper,
-                               std::vector<uint32_t>& data_shape,
-                               const onnx::TensorProto& initializer,
-                               std::vector<uint8_t>& transposed_data) const {
-    auto tmp = data_shape[0];
-    data_shape[0] = data_shape[1];
-    data_shape[1] = tmp;
-    std::vector<size_t> two_dim_trans_perm{1, 0};
-    return TransposeInitializer(qnn_model_wrapper, initializer, two_dim_trans_perm, transposed_data);
-  }
-
   // Onnx Pads is [x1_begin, x2_begin, x1_end, x2_end], QNN requires [x1_begin, x1_end, x2_begin, x2_end]
-  void ReArranagePads(std::vector<uint32_t>& pads) const {
+  void ReArrangePads(std::vector<uint32_t>& pads) const {
     auto pads_size = pads.size();
     auto middle_pos = pads_size / 2;
     std::vector<uint32_t> first_half(pads.begin(), pads.begin() + middle_pos);
@@ -288,7 +253,6 @@ class BaseOpBuilder : public IOpBuilder {
                               const NodeUnit& node_unit,
                               Qnn_Scalar_t& axis_qnn_scalar,
                               int32_t& default_axis_value) const;
-  Qnn_TensorType_t GetInputTensorType(const QnnModelWrapper& qnn_model_wrapper, const std::string& input_name) const;
 
   size_t GetInputCountQnnRequired(const NodeUnit& node_unit) const {
     auto input_output_cout = GetInputOutputCountQnnRequired(node_unit.OpType());
@@ -320,9 +284,6 @@ class BaseOpBuilder : public IOpBuilder {
 
  private:
   std::string op_builder_type_;
-  const std::vector<size_t> nchw2nhwc_perm{0, 2, 3, 1};
-  const std::vector<size_t> nchw2hwcn_perm{2, 3, 1, 0};
-  const std::vector<size_t> cnhw2hwcn_perm{2, 3, 0, 1};
 };
 
 // Type that holds information about an ONNX attribute.

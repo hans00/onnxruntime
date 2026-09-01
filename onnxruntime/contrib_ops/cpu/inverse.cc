@@ -53,7 +53,7 @@ struct Inverse::ComputeImpl<MLFloat16> {
   void operator()(const Tensor* input, Tensor* output,
                   int64_t batch_num, int64_t rows, int64_t cols) const {
     auto batch_offset = batch_num * rows * cols;
-    // Direct cast to half as it just as MLFloat16 containes only uint16_t
+    // Direct cast to half as it just as MLFloat16 contains only uint16_t
     const auto* input_data = reinterpret_cast<const Eigen::half*>(input->Data<MLFloat16>() + batch_offset);
     auto* output_data = reinterpret_cast<Eigen::half*>(output->MutableData<MLFloat16>() + batch_offset);
 
@@ -69,6 +69,8 @@ Status Inverse::Compute(OpKernelContext* ctx) const {
   const auto& input_shape = input->Shape();
   const auto num_dim = input_shape.NumDimensions();
   auto* output = ctx->Output(0, input_shape);
+
+  ORT_RETURN_IF_NOT(num_dim >= 2, "Input tensor rank must be >= 2, got: ", num_dim);
 
   int64_t num_batches = 1;
   const int64_t rows = input_shape.GetDims()[num_dim - 2];

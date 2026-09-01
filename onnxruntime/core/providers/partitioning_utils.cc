@@ -88,8 +88,6 @@ It is required to ensure we do not break up a QDQ node unit during partitioning.
 @param graph_viewer GraphViewer that IExecutionProvider::GetCapability is called with.
 @param is_node_supported_fn Callback to check whether a node is supported.
 @param on_group_closed_fn Callback to indicate a completed partition node group.
-@param debug_output Print diagnostic output about the partitions and reasons for partition breaks.
-                    No-op in a release build.
 @return The partition node groups.
 */
 std::vector<std::vector<const Node*>> CreateSupportedPartitionNodeGroups(
@@ -97,12 +95,7 @@ std::vector<std::vector<const Node*>> CreateSupportedPartitionNodeGroups(
     const IsNodeSupportedFn& is_node_supported_fn,
     const OnGroupClosedFn& on_group_closed_fn,
     const std::string& execution_provider_type,
-    const std::unordered_map<const Node*, const NodeUnit*>* node_unit_map,
-    bool debug_output) {
-#ifdef NDEBUG
-  ORT_UNUSED_PARAMETER(debug_output);
-#endif
-
+    const std::unordered_map<const Node*, const NodeUnit*>* node_unit_map) {
   ORT_ENFORCE(is_node_supported_fn, "Node support test is required.");
 
   /*
@@ -146,12 +139,10 @@ std::vector<std::vector<const Node*>> CreateSupportedPartitionNodeGroups(
   auto close_group = [&]() {
     if (!supported_group.empty()) {
 #ifndef NDEBUG
-      if (debug_output) {
-        LOGS_DEFAULT(VERBOSE) << "New partition node group.\n"
-                              << "Unsupported nodes on group border: "
-                              << NodeGroupDebugString(nodes_to_process_with_next_group, true) << "\n"
-                              << "Nodes in group: " << NodeGroupDebugString(supported_group);
-      }
+      LOGS_DEFAULT(VERBOSE) << "New partition node group.\n"
+                            << "Unsupported nodes on group border: "
+                            << NodeGroupDebugString(nodes_to_process_with_next_group, true) << "\n"
+                            << "Nodes in group: " << NodeGroupDebugString(supported_group);
 #endif
 
       // if no on_group_closed_fn callback was given, keep the partition
@@ -163,7 +154,7 @@ std::vector<std::vector<const Node*>> CreateSupportedPartitionNodeGroups(
       }
 #ifndef NDEBUG
       else {
-        LOGS_DEFAULT_IF(debug_output, VERBOSE) << "Discarded partition node group.";
+        LOGS_DEFAULT(VERBOSE) << "Discarded partition node group.";
       }
 #endif
 
@@ -207,6 +198,11 @@ std::vector<std::vector<const Node*>> CreateSupportedPartitionNodeGroups(
         }
 
         supported_group.push_back(&node);
+        const Node* redundent_clip_node = node_unit->GetRedundantClipNode();
+        if (redundent_clip_node) {
+          supported_group.push_back(redundent_clip_node);
+          supported_group_border.erase(redundent_clip_node);
+        }
 
         for (const auto& q : node_unit->GetQNodes()) {
           supported_group.push_back(q);
@@ -291,37 +287,51 @@ InlinedHashSet<const Node*> CreateExcludedNodeSet(const GraphViewer& graph_viewe
 std::unique_ptr<ComputeCapability> MakeComputeCapability(const GraphViewer& graph_viewer,
                                                          const std::vector<const Node*>& group,
                                                          const GenerateMetadefNameFn& generate_metadef_name,
-                                                         const std::string& execution_provider_name) {
-  std::unordered_set<const Node*> node_set;
+                                                         const std::string& execution_provider_name,
+                                                         bool drop_constant_initializers) {
+  InlinedHashSet<const Node*> node_set;
   node_set.reserve(group.size());
   node_set.insert(group.cbegin(), group.cend());
 
   std::unique_ptr<IndexedSubGraph> sub_graph = std::make_unique<IndexedSubGraph>();
 
-  std::unordered_set<const NodeArg*> node_outputs;
-  std::unordered_set<const NodeArg*> subgraph_inputs;
-  std::unordered_set<const NodeArg*> subgraph_outputs;
-  std::vector<const NodeArg*> ordered_subgraph_inputs;
-  std::vector<const NodeArg*> ordered_subgraph_outputs;
+  InlinedHashSet<const NodeArg*> node_outputs;
+  InlinedHashSet<const NodeArg*> subgraph_inputs;
+  InlinedHashSet<const NodeArg*> subgraph_outputs;
+  InlinedVector<const NodeArg*> ordered_subgraph_inputs;
+  InlinedVector<const NodeArg*> ordered_subgraph_outputs;
 
   const auto& graph_output_list = graph_viewer.GetOutputs();
-  std::unordered_set<const NodeArg*> graph_outputs(graph_output_list.cbegin(), graph_output_list.cend());
+  InlinedHashSet<const NodeArg*> graph_outputs(graph_output_list.cbegin(), graph_output_list.cend());
 
   for (const Node* node : group) {
     sub_graph->nodes.push_back(node->Index());
 
-    for (const auto* input : node->InputDefs()) {
-      if (!input->Exists()) {
-        // skip the placeholder inputs
-        continue;
-      }
-      // if the node input was not produced by this subgraph, add it to the subgraph inputs.
-      if (!Contains(node_outputs, input)) {
-        if (!Contains(subgraph_inputs, input)) {
-          subgraph_inputs.insert(input);
-          ordered_subgraph_inputs.push_back(input);
+    auto collect_boundary_inputs = [&](const auto& defs) {
+      for (const auto* input : defs) {
+        if (!input->Exists()) {
+          continue;
+        }
+        if (!Contains(node_outputs, input)) {
+          if (subgraph_inputs.insert(input).second) {
+            ordered_subgraph_inputs.push_back(input);
+          }
         }
       }
+    };
+
+    collect_boundary_inputs(node->InputDefs());
+
+    // Region-bearing ops (Loop/If/Scan) reference outer-scope SSA values via
+    // ImplicitInputDefs rather than InputDefs. When an EP claims the whole
+    // control-flow op, those implicit captures must also be in MetaDef::inputs
+    // so FinalizeFuseSubGraph can rewire the outer-scope edges onto the fused
+    // node's InputDefs. Without this, plugin EPs that fuse Loop/If/Scan lose
+    // the captures at the fused-node boundary and cannot resolve them at
+    // Compute time. Running this after the explicit loop preserves
+    // explicit-operand index ordering in meta_def->inputs.
+    if (node->ContainsSubgraph()) {
+      collect_boundary_inputs(node->ImplicitInputDefs());
     }
 
     const auto& output_defs = node->OutputDefs();
@@ -338,8 +348,7 @@ std::unique_ptr<ComputeCapability> MakeComputeCapability(const GraphViewer& grap
     for (auto it = node->OutputEdgesBegin(), end = node->OutputEdgesEnd(); it != end; ++it) {
       if (!Contains(node_set, &it->GetNode())) {
         const auto* output_def = output_defs[it->GetSrcArgIndex()];
-        if (!Contains(subgraph_outputs, output_def) && !Contains(graph_outputs, output_def)) {
-          subgraph_outputs.insert(output_def);
+        if (!Contains(graph_outputs, output_def) && subgraph_outputs.insert(output_def).second) {
           ordered_subgraph_outputs.push_back(output_def);
         }
       }
@@ -354,6 +363,10 @@ std::unique_ptr<ComputeCapability> MakeComputeCapability(const GraphViewer& grap
   meta_def->status = ONNX_NAMESPACE::EXPERIMENTAL;
 
   for (const auto& input : ordered_subgraph_inputs) {
+    if (drop_constant_initializers && graph_viewer.IsConstantInitializer(input->Name(), true)) {
+      continue;
+    }
+
     meta_def->inputs.push_back(input->Name());
   }
 
@@ -374,13 +387,12 @@ CreateSupportedPartitions(const GraphViewer& graph_viewer,
                           const std::string& execution_provider_name,
                           const std::string& execution_provider_type,
                           const std::unordered_map<const Node*, const NodeUnit*>* node_unit_map,
-                          bool debug_output) {
+                          bool drop_constant_initializers) {
   const auto groups = CreateSupportedPartitionNodeGroups(graph_viewer,
                                                          is_node_supported_fn,
                                                          on_partition_closed_fn,
                                                          execution_provider_type,
-                                                         node_unit_map,
-                                                         debug_output);
+                                                         node_unit_map);
 
   std::vector<std::unique_ptr<ComputeCapability>> partitions{};
   partitions.reserve(groups.size());
@@ -390,7 +402,7 @@ CreateSupportedPartitions(const GraphViewer& graph_viewer,
       std::back_inserter(partitions),
       [&](const auto& supported_partition) {
         return MakeComputeCapability(graph_viewer, supported_partition, generate_metadef_name_fn,
-                                     execution_provider_name);
+                                     execution_provider_name, drop_constant_initializers);
       });
 
   return partitions;
@@ -404,7 +416,7 @@ CreateSupportedPartitions(const GraphViewer& graph_viewer,
                           const std::string& execution_provider_name,
                           const std::string& execution_provider_type,
                           const std::unordered_map<const Node*, const NodeUnit*>* node_unit_map,
-                          bool debug_output) {
+                          bool drop_constant_initializers) {
   const auto excluded_nodes = CreateExcludedNodeSet(graph_viewer, stop_ops);
   const bool check_excluded_nodes = !excluded_nodes.empty();
 
@@ -419,7 +431,7 @@ CreateSupportedPartitions(const GraphViewer& graph_viewer,
       execution_provider_name,
       execution_provider_type,
       node_unit_map,
-      debug_output);
+      drop_constant_initializers);
 }
 
 }  // namespace utils

@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #include "gtest/gtest.h"
+#include "test/common/cuda_op_test_utils.h"
 #include "test/providers/provider_test_utils.h"
 
 #include <limits>
@@ -18,13 +19,17 @@ constexpr double DOUBLE_NINF = -std::numeric_limits<double>::infinity();
 constexpr double DOUBLE_NAN = std::numeric_limits<double>::quiet_NaN();
 
 template <typename T>
-void run_is_inf_test(int opset, int64_t detect_positive, int64_t detect_negative, const std::initializer_list<T>& input, const std::initializer_list<bool>& output) {
+void run_is_inf_test(int opset, int64_t detect_positive, int64_t detect_negative, const std::initializer_list<T>& input, const std::initializer_list<bool>& output, bool skip_trt = false) {
   OpTester test("IsInf", opset);
   test.AddAttribute<int64_t>("detect_positive", detect_positive);
   test.AddAttribute<int64_t>("detect_negative", detect_negative);
   test.AddInput<T>("X", {onnxruntime::narrow<int64_t>(input.size())}, input);
   test.AddOutput<bool>("Y", {onnxruntime::narrow<int64_t>(output.size())}, output);
-  test.Run();
+  if (skip_trt) {
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+  } else {
+    test.Run();
+  }
 }
 
 TEST(IsInfTest, test_isinf_float10) {
@@ -121,6 +126,10 @@ TEST(IsInfTest, test_isinf_negative_mlfloat16) {
 }
 
 TEST(IsInfTest, test_isinf_bfloat16) {
+  if (NeedSkipIfCudaArchLowerThan(800)) {
+    GTEST_SKIP() << "Skipping BFloat16 tests on CUDA Compute Capability < 8.0";
+  }
+
   std::initializer_list<BFloat16> input = {BFloat16{-1.7f}, BFloat16::NaN, BFloat16::Infinity, 3.6_bfp16,
                                            BFloat16::NegativeInfinity, BFloat16::Infinity};
   std::initializer_list<bool> output = {false, false, true, false, true, true};
@@ -128,6 +137,10 @@ TEST(IsInfTest, test_isinf_bfloat16) {
 }
 
 TEST(IsInfTest, test_isinf_positive_bfloat16) {
+  if (NeedSkipIfCudaArchLowerThan(800)) {
+    GTEST_SKIP() << "Skipping BFloat16 tests on CUDA Compute Capability < 8.0";
+  }
+
   std::initializer_list<BFloat16> input = {BFloat16{-1.7f}, BFloat16::NaN, BFloat16::Infinity, 3.6_bfp16,
                                            BFloat16::NegativeInfinity, BFloat16::Infinity};
   std::initializer_list<bool> output = {false, false, true, false, false, true};
@@ -135,6 +148,10 @@ TEST(IsInfTest, test_isinf_positive_bfloat16) {
 }
 
 TEST(IsInfTest, test_isinf_negative_bfloat16) {
+  if (NeedSkipIfCudaArchLowerThan(800)) {
+    GTEST_SKIP() << "Skipping BFloat16 tests on CUDA Compute Capability < 8.0";
+  }
+
   std::initializer_list<BFloat16> input = {BFloat16{-1.7f}, BFloat16::NaN, BFloat16::Infinity, 3.6_bfp16,
                                            BFloat16::NegativeInfinity, BFloat16::Infinity};
   std::initializer_list<bool> output = {false, false, false, false, true, false};
@@ -146,7 +163,7 @@ TEST(IsInfTest, test_Float8E4M3FN) {
   std::initializer_list<Float8E4M3FN> input = {
       Float8E4M3FN(-1.0f), Float8E4M3FN(FLOAT_NAN, false), Float8E4M3FN(1.0f), Float8E4M3FN(FLOAT_NINF, false), Float8E4M3FN(FLOAT_NINF, false), Float8E4M3FN(FLOAT_INF, false)};
   std::initializer_list<bool> output = {false, false, false, false, false, false};
-  run_is_inf_test(20, 1, 1, input, output);
+  run_is_inf_test(20, 1, 1, input, output, true);  // Skip as TRT10.1 supports Float8 but T4 GPU run on TRT CIs doesn't
 }
 
 TEST(IsInfTest, test_Float8E4M3FNUZ) {

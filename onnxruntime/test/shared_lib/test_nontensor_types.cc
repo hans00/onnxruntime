@@ -1,15 +1,17 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <array>
 #include <functional>
 #include <iostream>
 #include <set>
+#include <array>
 
 #include "core/common/common.h"
 #include "core/session/onnxruntime_cxx_api.h"
 #include "test_allocator.h"
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
@@ -102,13 +104,13 @@ TEST(CApiTest, CreateGetVectorOfMapsStringFloat) {  // support zipmap output typ
   constexpr int64_t NUM_KV_PAIRS = 4;
   std::vector<Ort::Value> in;
   const char* keys_arr[NUM_KV_PAIRS] = {"abc", "def", "ghi", "jkl"};
-  std::vector<std::string> keys{keys_arr, keys_arr + NUM_KV_PAIRS};
-  std::vector<int64_t> dims = {NUM_KV_PAIRS};
-  std::vector<float> values{3.0f, 1.0f, 2.f, 0.f};
+  std::array<int64_t, 1> dims = {NUM_KV_PAIRS};
+  std::array<float, NUM_KV_PAIRS> values{3.0f, 1.0f, 2.f, 0.f};
   for (size_t i = 0; i < N; ++i) {
     // create key tensor
-    Ort::Value keys_tensor = Ort::Value::CreateTensor(info, keys.data(), keys.size() * sizeof(std::string),
-                                                      dims.data(), dims.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING);
+    Ort::Value keys_tensor = Ort::Value::CreateTensor(Ort::AllocatorWithDefaultOptions(), dims.data(), dims.size(),
+                                                      ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING);
+    keys_tensor.FillStringTensor(keys_arr, NUM_KV_PAIRS);
     // create value tensor
     Ort::Value values_tensor = Ort::Value::CreateTensor(info, values.data(), values.size() * sizeof(float),
                                                         dims.data(), dims.size(), ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT);
@@ -147,7 +149,7 @@ TEST(CApiTest, CreateGetVectorOfMapsStringFloat) {  // support zipmap output typ
       std::string stemp(s + start, count);
       keys_ret.insert(stemp);
     }
-    ASSERT_EQ(keys_ret, std::set<std::string>(std::begin(keys), std::end(keys)));
+    ASSERT_EQ(keys_ret, std::set<std::string>(std::begin(keys_arr), std::end(keys_arr)));
 
     // second fetch the values
     Ort::Value values_ort = map_out.GetValue(1, default_allocator.get());
@@ -277,6 +279,52 @@ TEST(CApiTest, CreateGetSeqStringTensors) {
   ASSERT_EQ(string_set, std::set<std::string>(std::begin(string_input_data), std::end(string_input_data)));
 }
 
+// Test - GetValue() on a sequence of packed sub-byte tensors
+// (int4/uint4) must copy only the packed storage bytes.
+TEST(CApiTest, CreateGetSeqSubByteTensors) {
+  auto default_allocator = std::make_unique<MockedOrtAllocator>();
+  Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+
+  auto run_for_type = [&](ONNXTensorElementDataType elem_type, std::array<uint8_t, 4> packed) {
+    const std::vector<int64_t> dims{7};  // 7 4-bit elements -> 4 packed bytes
+    constexpr int N = 2;
+
+    std::vector<Ort::Value> in;
+    for (int i = 0; i < N; ++i) {
+      Ort::Value tensor = Ort::Value::CreateTensor(info, packed.data(), packed.size(),
+                                                   dims.data(), dims.size(), elem_type);
+      in.push_back(std::move(tensor));
+    }
+
+    Ort::Value seq_ort = Ort::Value::CreateSequence(in);
+
+    for (int idx = 0; idx < N; ++idx) {
+      Ort::Value out = seq_ort.GetValue(idx, default_allocator.get());
+
+      auto type_info = out.GetTypeInfo();
+      auto tensor_info = type_info.GetTensorTypeAndShapeInfo();
+      ASSERT_EQ(tensor_info.GetElementType(), elem_type);
+      ASSERT_EQ(tensor_info.GetShape(), dims);
+
+      // `out` is a fresh tensor that GetValue() allocated and copied into, so its data is a
+      // distinct buffer from the input `packed` bytes (the input tensors alias `packed`).
+      // Comparing them therefore validates the copy rather than reading the same memory twice.
+      const size_t out_bytes = out.GetTensorSizeInBytes();
+      ASSERT_EQ(out_bytes, packed.size());
+      const auto* ret = static_cast<const uint8_t*>(out.GetTensorRawData());
+      ASSERT_NE(static_cast<const void*>(ret), static_cast<const void*>(packed.data()));
+      for (size_t i = 0; i < out_bytes; ++i) {
+        ASSERT_EQ(ret[i], packed[i]);
+      }
+    }
+  };
+
+  // {0, 1, 2, 3, -8, 7, 6, pad_0}
+  run_for_type(ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT4, {0x10, 0x32, 0x78, 0x06});
+  // {0, 1, 2, 3, 4, 5, 15, pad_0}
+  run_for_type(ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT4, {0x10, 0x32, 0x54, 0x0F});
+}
+
 TEST(CApiTest, TypeInfoSequence) {
   // Creation
   auto default_allocator = std::make_unique<MockedOrtAllocator>();
@@ -370,11 +418,10 @@ TEST(CPPApi, Float16Zeros) {
 }
 
 namespace {
-const auto EpsilonFl16 = Ort::Float16_t::FromBits(Ort::Float16_t::kEpsilonBits);
 const auto NaNFl16 = Ort::Float16_t::FromBits(Ort::Float16_t::kPositiveQNaNBits);
-const auto MinValueFl16 = Ort::Float16_t::FromBits(Ort::Float16_t::kMinValueBits);
 const auto MaxValueFl16 = Ort::Float16_t::FromBits(Ort::Float16_t::kMaxValueBits);
 const auto InfinityFl16 = Ort::Float16_t::FromBits(Ort::Float16_t::kPositiveInfinityBits);
+const auto ZeroFl16 = Ort::Float16_t::FromBits(0x0000);
 }  // namespace
 
 TEST(CPPApi, Float16Comparision) {
@@ -382,8 +429,6 @@ TEST(CPPApi, Float16Comparision) {
   const auto left_same = Ort::Float16_t(-33.33f);
   const auto right = Ort::Float16_t(66.66f);
   const auto right_same = Ort::Float16_t(66.66f);
-
-  EXPECT_LT(EpsilonFl16, right);
 
   EXPECT_EQ(left, left_same);
   EXPECT_NE(left, left_same.Negate());
@@ -416,13 +461,12 @@ TEST(CPPApi, Float16NaNComparision) {
 
   EXPECT_FALSE(MaxValueFl16 < NaNFl16);
   EXPECT_FALSE(MaxValueFl16 == NaNFl16);
-  EXPECT_FALSE(NaNFl16 < MinValueFl16);
+  EXPECT_FALSE(NaNFl16 < MaxValueFl16);
 
-  EXPECT_LT(MinValueFl16, MaxValueFl16);
+  EXPECT_LT(ZeroFl16, MaxValueFl16);
 }
 
 TEST(CPPApi, Float16Infinity) {
-  EXPECT_FALSE(MinValueFl16.IsInfinity());
   EXPECT_FALSE(MaxValueFl16.IsInfinity());
   EXPECT_TRUE(MaxValueFl16.IsFinite());
 
@@ -530,11 +574,10 @@ TEST(CPPApi, BFloat16Zeros) {
 }
 
 namespace {
-const auto EpsilonBfl16 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kEpsilonBits);
-const auto NaNBfl15 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kPositiveQNaNBits);
-const auto MinValueBfl16 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kMinValueBits);
+const auto NaNBfl16 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kPositiveQNaNBits);
 const auto MaxValueBfl16 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kMaxValueBits);
 const auto InfinityBFl16 = Ort::BFloat16_t::FromBits(Ort::BFloat16_t::kPositiveInfinityBits);
+const auto ZeroBfl16 = Ort::BFloat16_t::FromBits(0x0000);
 }  // namespace
 
 TEST(CPPApi, BFloat16Comparision) {
@@ -542,8 +585,6 @@ TEST(CPPApi, BFloat16Comparision) {
   const auto left_same = Ort::BFloat16_t(-33.33f);
   const auto right = Ort::BFloat16_t(66.66f);
   const auto right_same = Ort::BFloat16_t(66.66f);
-
-  EXPECT_LT(EpsilonBfl16, right);
 
   EXPECT_EQ(left, left_same);
   EXPECT_NE(left, left_same.Negate());
@@ -561,7 +602,7 @@ TEST(CPPApi, BFloat16TestNAN) {
   EXPECT_TRUE(fp16NANFromSingle.IsNaN());
 
   // NaN are not equal to each other
-  EXPECT_NE(NaNBfl15, fp16NANFromSingle);
+  EXPECT_NE(NaNBfl16, fp16NANFromSingle);
 
   const float NanFromBFloat16 = fp16NANFromSingle.ToFloat();
   EXPECT_TRUE(std::isnan(NanFromBFloat16));
@@ -570,19 +611,18 @@ TEST(CPPApi, BFloat16TestNAN) {
 }
 
 TEST(CPPApi, BFloat16NaNComparision) {
-  EXPECT_FALSE(NaNBfl15 < NaNBfl15);
-  EXPECT_TRUE(NaNBfl15 != NaNBfl15);
-  EXPECT_FALSE(NaNBfl15 == NaNBfl15);
+  EXPECT_FALSE(NaNBfl16 < NaNBfl16);
+  EXPECT_TRUE(NaNBfl16 != NaNBfl16);
+  EXPECT_FALSE(NaNBfl16 == NaNBfl16);
 
-  EXPECT_FALSE(MaxValueBfl16 < NaNBfl15);
-  EXPECT_FALSE(MaxValueBfl16 == NaNBfl15);
-  EXPECT_FALSE(NaNBfl15 < MinValueBfl16);
+  EXPECT_FALSE(MaxValueBfl16 < NaNBfl16);
+  EXPECT_FALSE(MaxValueBfl16 == NaNBfl16);
+  EXPECT_FALSE(NaNBfl16 < MaxValueBfl16);
 
-  EXPECT_LT(MinValueBfl16, MaxValueBfl16);
+  EXPECT_LT(ZeroBfl16, MaxValueBfl16);
 }
 
 TEST(CPPApi, BFloat16Infinity) {
-  EXPECT_FALSE(MinValueBfl16.IsInfinity());
   EXPECT_FALSE(MaxValueBfl16.IsInfinity());
   EXPECT_TRUE(MaxValueBfl16.IsFinite());
 
@@ -995,6 +1035,32 @@ TEST(CApiTest, SparseTensorFillSparseTensorFormatAPI) {
   }
 }
 
+TEST(CApi, TestResize) {
+  std::vector<Ort::Value> values;
+  values.resize(10);
+
+  std::vector<Ort::Status> sts;
+  sts.resize(5);
+
+  std::vector<Ort::CustomOpDomain> domains;
+  domains.resize(5);
+
+  std::vector<Ort::TensorTypeAndShapeInfo> type_and_shape;
+  type_and_shape.resize(5);
+
+  std::vector<Ort::SequenceTypeInfo> seq_type_info;
+  seq_type_info.resize(5);
+
+  std::vector<Ort::MapTypeInfo> map_type_info;
+  map_type_info.resize(5);
+
+  std::vector<Ort::TypeInfo> type_info;
+  type_info.resize(5);
+
+  std::vector<Ort::OpAttr> op_attr;
+  op_attr.resize(5);
+}
+
 TEST(CApiTest, SparseTensorFillSparseFormatStringsAPI) {
   auto allocator = Ort::AllocatorWithDefaultOptions();
   Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
@@ -1238,4 +1304,100 @@ TEST(CApiTest, SparseTensorFillSparseFormatStringsAPI) {
     }
   }
 }
+
+#if !defined(ORT_NO_EXCEPTIONS)
+TEST(CApiTest, SparseTensorInvalidIndicesValidation) {
+  auto allocator = Ort::AllocatorWithDefaultOptions();
+  Ort::MemoryInfo info("Cpu", OrtDeviceAllocator, 0, OrtMemTypeDefault);
+
+  // Common dense shape and values
+  const std::vector<int64_t> dense_shape{3, 3};
+  Ort::Value::Shape ort_dense_shape{dense_shape.data(), dense_shape.size()};
+  std::vector<int32_t> values = {1, 1, 1};
+  constexpr int64_t values_len = 3;
+
+  //
+  // COO Negative linear index
+  //
+  {
+    auto coo_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> linear_indices = {-1, 3, 5};
+    ASSERT_THROW(
+        coo_st.FillSparseTensorCoo(info, {&values_len, 1U, {values.data()}},
+                                   linear_indices.data(), linear_indices.size()),
+        Ort::Exception);
+  }
+
+  //
+  // COO Linear index out of upper bounds
+  //
+  {
+    auto coo_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> linear_indices = {0, 3, 9};  // 9 is out of bounds for 3x3=9 (0-8)
+    ASSERT_THROW(
+        coo_st.FillSparseTensorCoo(info, {&values_len, 1U, {values.data()}},
+                                   linear_indices.data(), linear_indices.size()),
+        Ort::Exception);
+  }
+
+  //
+  // COO 2D indices out of row bounds
+  //
+  {
+    auto coo_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> dim_indices = {
+        0, 1,  // Valid
+        3, 0,  // Invalid row 3
+        2, 2   // Valid
+    };
+    ASSERT_THROW(
+        coo_st.FillSparseTensorCoo(info, {&values_len, 1U, {values.data()}},
+                                   dim_indices.data(), dim_indices.size()),
+        Ort::Exception);
+  }
+
+  //
+  // CSR inner index out of column bounds
+  //
+  {
+    auto csr_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> inner_indices = {1, 3, 1};  // 3 is out of bounds for 3 cols (0-2)
+    std::vector<int64_t> outer_indices = {0, 1, 2, 3};
+    ASSERT_THROW(
+        csr_st.FillSparseTensorCsr(info, {&values_len, 1U, {values.data()}},
+                                   inner_indices.data(), inner_indices.size(),
+                                   outer_indices.data(), outer_indices.size()),
+        Ort::Exception);
+  }
+
+  //
+  // CSR outer index not monotonically non-decreasing
+  //
+  {
+    auto csr_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> inner_indices = {0, 1, 2};
+    std::vector<int64_t> outer_indices = {0, 2, 1, 3};  // Drops from 2 to 1
+    ASSERT_THROW(
+        csr_st.FillSparseTensorCsr(info, {&values_len, 1U, {values.data()}},
+                                   inner_indices.data(), inner_indices.size(),
+                                   outer_indices.data(), outer_indices.size()),
+        Ort::Exception);
+  }
+
+  //
+  // CSR outer index out of upper bounds (greater than inner_indices.size())
+  //
+  {
+    auto csr_st = Ort::Value::CreateSparseTensor<int32_t>(allocator, ort_dense_shape);
+    std::vector<int64_t> inner_indices = {0, 1, 2};
+    std::vector<int64_t> outer_indices = {0, 1, 2, 4};  // 4 is > inner_indices.size() (3)
+    ASSERT_THROW(
+        csr_st.FillSparseTensorCsr(info, {&values_len, 1U, {values.data()}},
+                                   inner_indices.data(), inner_indices.size(),
+                                   outer_indices.data(), outer_indices.size()),
+        Ort::Exception);
+  }
+}
+#endif  // !defined(ORT_NO_EXCEPTIONS)
+
 #endif  // !defined(DISABLE_SPARSE_TENSORS)

@@ -1,11 +1,20 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-import {Tensor} from './tensor.js';
+import { Tensor } from './tensor.js';
 
-export type SupportedTypedArrayConstructors = Float32ArrayConstructor|Uint8ArrayConstructor|Int8ArrayConstructor|
-    Uint16ArrayConstructor|Int16ArrayConstructor|Int32ArrayConstructor|BigInt64ArrayConstructor|Uint8ArrayConstructor|
-    Float64ArrayConstructor|Uint32ArrayConstructor|BigUint64ArrayConstructor;
+export type SupportedTypedArrayConstructors =
+  | Float32ArrayConstructor
+  | Uint8ArrayConstructor
+  | Int8ArrayConstructor
+  | Uint16ArrayConstructor
+  | Int16ArrayConstructor
+  | Int32ArrayConstructor
+  | BigInt64ArrayConstructor
+  | Uint8ArrayConstructor
+  | Float64ArrayConstructor
+  | Uint32ArrayConstructor
+  | BigUint64ArrayConstructor;
 export type SupportedTypedArray = InstanceType<SupportedTypedArrayConstructors>;
 
 // a runtime map that maps type string to TypedArray constructor. Should match Tensor.DataTypeMap.
@@ -19,6 +28,8 @@ export const NUMERIC_TENSOR_TYPE_TO_TYPEDARRAY_MAP = new Map<string, SupportedTy
   ['bool', Uint8Array],
   ['float64', Float64Array],
   ['uint32', Uint32Array],
+  ['int4', Uint8Array],
+  ['uint4', Uint8Array],
 ]);
 
 // a runtime map that maps type string to TypedArray constructor. Should match Tensor.DataTypeMap.
@@ -33,12 +44,6 @@ export const NUMERIC_TENSOR_TYPEDARRAY_TO_TYPE_MAP = new Map<SupportedTypedArray
   [Uint32Array, 'uint32'],
 ]);
 
-// a dummy type declaration for Float16Array in case any polyfill is available.
-declare global {
-  // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
-  const Float16Array: any;
-}
-
 // the following code allows delaying execution of BigInt/Float16Array checking. This allows lazy initialization for
 // NUMERIC_TENSOR_TYPE_TO_TYPEDARRAY_MAP and NUMERIC_TENSOR_TYPEDARRAY_TO_TYPE_MAP, which allows BigInt/Float16Array
 // polyfill if available.
@@ -48,6 +53,9 @@ export const checkTypedArray = () => {
     isTypedArrayChecked = true;
     const isBigInt64ArrayAvailable = typeof BigInt64Array !== 'undefined' && BigInt64Array.from;
     const isBigUint64ArrayAvailable = typeof BigUint64Array !== 'undefined' && BigUint64Array.from;
+
+    // eslint-disable-next-line @typescript-eslint/naming-convention, @typescript-eslint/no-explicit-any
+    const Float16Array = (globalThis as any).Float16Array;
     const isFloat16ArrayAvailable = typeof Float16Array !== 'undefined' && Float16Array.from;
 
     if (isBigInt64ArrayAvailable) {

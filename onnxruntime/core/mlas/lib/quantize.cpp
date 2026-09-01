@@ -519,6 +519,87 @@ Return Value:
     }
 }
 
+template<bool Signed>
+void
+MLASCALL
+MlasQuantizeLinearInt4Kernel(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    constexpr int32_t MinimumValue = Int4Traits<Signed>::Min;
+    constexpr int32_t MaximumValue = Int4Traits<Signed>::Max;
+    using UnpackedType = typename Int4Traits<Signed>::UnpackedType;
+
+    auto ScaleVector = MlasBroadcastFloat32x4(Scale);
+    auto MinimumValueVector = MlasBroadcastFloat32x4(static_cast<float>(MinimumValue - ZeroPoint));
+    auto MaximumValueVector = MlasBroadcastFloat32x4(static_cast<float>(MaximumValue - ZeroPoint));
+    auto ZeroPointVector = MlasBroadcastInt32x4(ZeroPoint);
+
+    // Holds 4 quantized 8bit values that will be packed into the output as packed 4bit values.
+    UnpackedType TmpOutput[4] = {};
+
+    while (N >= 4) {
+
+        auto FloatVector = MlasLoadFloat32x4(Input);
+        auto IntegerVector = MlasQuantizeLinearVector(FloatVector, ScaleVector,
+            MinimumValueVector, MaximumValueVector, ZeroPointVector);
+
+        IntegerVector = MlasQuantizeLinearPackBytes<UnpackedType>(IntegerVector);
+        MlasQuantizeLinearStore4PackedValues<UnpackedType>(IntegerVector, &TmpOutput[0]);
+        MlasPackInt4Elements(Output++, TmpOutput[0], TmpOutput[1]);
+        MlasPackInt4Elements(Output++, TmpOutput[2], TmpOutput[3]);
+
+        Input += 4;
+        N -= 4;
+    }
+
+    for (size_t n = 0; n < N; n++) {
+
+#if defined(MLAS_NEON64_INTRINSICS)
+        auto FloatVector = vld1q_dup_f32(Input + n);
+#elif defined(MLAS_LSX_INTRINSICS)
+        MLAS_FLOAT32X4 FloatVector = (MLAS_FLOAT32X4)__lsx_vldrepl_w(Input+n, 0);
+#else
+        auto FloatVector = _mm_load_ss(Input + n);
+#endif
+        auto IntegerVector = MlasQuantizeLinearVector(FloatVector, ScaleVector,
+            MinimumValueVector, MaximumValueVector, ZeroPointVector);
+
+        MlasQuantizeLinearStoreSingleValue<UnpackedType>(IntegerVector, &TmpOutput[0]);
+        MlasSetInt4Element<UnpackedType>(Output, n, TmpOutput[0]);
+    }
+}
+
+void
+MLASCALL
+MlasQuantizeLinearS4Kernel(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    MlasQuantizeLinearInt4Kernel<true>(Input, Output, N, Scale, ZeroPoint);
+}
+
+void
+MLASCALL
+MlasQuantizeLinearU4Kernel(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    MlasQuantizeLinearInt4Kernel<false>(Input, Output, N, Scale, ZeroPoint);
+}
+
 void
 MLASCALL
 MlasQuantizeLinearS8Kernel(
@@ -569,6 +650,42 @@ MlasQuantizeLinearS16Kernel(
 )
 {
     MlasQuantizeLinearKernel<int16_t>(Input, Output, N, Scale, ZeroPoint);
+}
+
+void
+MLASCALL
+MlasQuantizeLinearS4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+#if defined(MLAS_TARGET_AMD64)
+    GetMlasPlatform().QuantizeLinearS4Kernel(
+#else
+    MlasQuantizeLinearS4Kernel(
+#endif
+        Input, Output, N, Scale, ZeroPoint);
+}
+
+void
+MLASCALL
+MlasQuantizeLinearU4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+#if defined(MLAS_TARGET_AMD64)
+    GetMlasPlatform().QuantizeLinearU4Kernel(
+#else
+    MlasQuantizeLinearU4Kernel(
+#endif
+        Input, Output, N, Scale, ZeroPoint);
 }
 
 template<>
@@ -649,7 +766,7 @@ MlasQuantizeLinear<int16_t>(
 
 #else
 
-#if defined(MLAS_TARGET_POWER)
+#if defined(MLAS_TARGET_POWER) || defined(MLAS_TARGET_S390X)
 
 template<>
 void
@@ -707,6 +824,31 @@ MlasQuantizeLinear<uint16_t>(
     GetMlasPlatform().QuantizeLinearU16Kernel(Input, Output, N, Scale, ZeroPoint);
 }
 
+void
+MLASCALL
+MlasQuantizeLinearS4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    GetMlasPlatform().QuantizeLinearS4Kernel(Input, Output, N, Scale, ZeroPoint);
+}
+
+void
+MLASCALL
+MlasQuantizeLinearU4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    GetMlasPlatform().QuantizeLinearU4Kernel(Input, Output, N, Scale, ZeroPoint);
+}
 #endif
 
 //
@@ -760,7 +902,7 @@ Return Value:
     }
 }
 
-#if !defined(MLAS_TARGET_POWER)
+#if !defined(MLAS_TARGET_POWER) && !defined(MLAS_TARGET_S390X)
 template
 void
 MLASCALL
@@ -805,6 +947,58 @@ MlasQuantizeLinear<uint16_t>(
     uint16_t ZeroPoint
     );
 
+template <bool Signed>
+void
+MLASCALL
+MlasQuantizeLinearInt4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    constexpr int32_t MinimumValue = Int4Traits<Signed>::Min;
+    constexpr int32_t MaximumValue = Int4Traits<Signed>::Max;
+    using UnpackedType = typename Int4Traits<Signed>::UnpackedType;
+
+    for (size_t n = 0; n < N; n++) {
+        float FloatValue = std::nearbyintf(Input[n] / Scale) + static_cast<float>(ZeroPoint);
+        FloatValue = std::max(FloatValue, static_cast<float>(MinimumValue));
+        FloatValue = std::min(FloatValue, static_cast<float>(MaximumValue));
+        UnpackedType IntValue = static_cast<UnpackedType>(FloatValue);
+
+        MlasSetInt4Element<UnpackedType>(Output, n, IntValue);
+    }
+}
+
+// QuantizeLinear INT4 implementation using the C++ runtime.
+void
+MLASCALL
+MlasQuantizeLinearS4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    MlasQuantizeLinearInt4<true>(Input, Output, N, Scale, ZeroPoint);
+}
+
+// QuantizeLinear UINT4 implementation using the C++ runtime.
+void
+MLASCALL
+MlasQuantizeLinearU4(
+    const float* Input,
+    uint8_t* Output,
+    size_t N,
+    float Scale,
+    int8_t ZeroPoint
+    )
+{
+    MlasQuantizeLinearInt4<false>(Input, Output, N, Scale, ZeroPoint);
+}
 #endif
 
 #endif
@@ -1487,6 +1681,204 @@ MlasRequantizeOutput(
     }
 }
 
+#elif defined(MLAS_TARGET_S390X)
+
+template <typename OutputType>
+void
+MLASCALL
+MlasRequantizeOutput(
+    const int32_t* Input,
+    size_t InputLeadingDimension,
+    OutputType* Output,
+    size_t OutputLeadingDimension,
+    const int32_t* Bias,
+    const float* Scale,
+    bool PerColumnScale,
+    OutputType ZeroPoint,
+    size_t StartM,
+    size_t StartN,
+    size_t CountM,
+    size_t CountN
+    )
+{
+    float PerMatrixScaleValue = PerColumnScale ? 0.0f : *Scale;
+    float MinimumValue = float(std::numeric_limits<OutputType>::lowest() - ZeroPoint);
+    float MaximumValue = float(std::numeric_limits<OutputType>::max() - ZeroPoint);
+
+    auto PerMatrixScaleVector = vec_splats(PerMatrixScaleValue);
+    auto MinimumVector = vec_splats(MinimumValue);
+    auto MaximumVector = vec_splats(MaximumValue);
+    auto ZeroPointVector = vec_splats(int32_t(ZeroPoint));
+
+    // Workaround to avoid 'variable set but not used' message
+    MLAS_UNREFERENCED_PARAMETER(PerMatrixScaleVector);
+
+    if (nullptr != Bias) {
+        Bias += StartN;
+    }
+    if (PerColumnScale) {
+        Scale += StartN;
+    }
+
+    Input += StartM * InputLeadingDimension + StartN;
+    Output += StartM * OutputLeadingDimension + StartN;
+
+    //
+    // Step through each row of the output matrix.
+    //
+
+    while (CountM-- > 0) {
+
+        const int32_t* bias = Bias;
+        const float* scale = PerColumnScale ? Scale : nullptr;
+        size_t n = CountN;
+
+        auto* RowInput = Input;
+        auto* RowOutput = Output;
+
+        // Process 16 cols at a time
+
+        while (n >= 16) {
+
+            auto IntegerVector0 = vec_xl(0, &RowInput[0]);
+            auto IntegerVector1 = vec_xl(0, &RowInput[4]);
+            auto IntegerVector2 = vec_xl(0, &RowInput[8]);
+            auto IntegerVector3 = vec_xl(0, &RowInput[12]);
+            RowInput += 16;
+
+            if (bias != nullptr) {
+                IntegerVector0 = IntegerVector0 + vec_xl(0, &bias[0]);
+                IntegerVector1 = IntegerVector1 + vec_xl(0, &bias[4]);
+                IntegerVector2 = IntegerVector2 + vec_xl(0, &bias[8]);
+                IntegerVector3 = IntegerVector3 + vec_xl(0, &bias[12]);
+                bias += 16;
+            }
+
+            auto FloatVector0 = vec_float(IntegerVector0);
+            auto FloatVector1 = vec_float(IntegerVector1);
+            auto FloatVector2 = vec_float(IntegerVector2);
+            auto FloatVector3 = vec_float(IntegerVector3);
+
+            if (scale != nullptr) {
+                FloatVector0 = FloatVector0 * vec_xl(0, &scale[0]);
+                FloatVector1 = FloatVector1 * vec_xl(0, &scale[4]);
+                FloatVector2 = FloatVector2 * vec_xl(0, &scale[8]);
+                FloatVector3 = FloatVector3 * vec_xl(0, &scale[12]);
+                scale += 16;
+            } else {
+                FloatVector0 = FloatVector0 * PerMatrixScaleVector;
+                FloatVector1 = FloatVector1 * PerMatrixScaleVector;
+                FloatVector2 = FloatVector2 * PerMatrixScaleVector;
+                FloatVector3 = FloatVector3 * PerMatrixScaleVector;
+            }
+
+            FloatVector0 = vec_max(FloatVector0, MinimumVector);
+            FloatVector1 = vec_max(FloatVector1, MinimumVector);
+            FloatVector2 = vec_max(FloatVector2, MinimumVector);
+            FloatVector3 = vec_max(FloatVector3, MinimumVector);
+
+            FloatVector0 = vec_min(FloatVector0, MaximumVector);
+            FloatVector1 = vec_min(FloatVector1, MaximumVector);
+            FloatVector2 = vec_min(FloatVector2, MaximumVector);
+            FloatVector3 = vec_min(FloatVector3, MaximumVector);
+
+            FloatVector0 = vec_round(FloatVector0);
+            FloatVector1 = vec_round(FloatVector1);
+            FloatVector2 = vec_round(FloatVector2);
+            FloatVector3 = vec_round(FloatVector3);
+
+            auto IntegerOutVector0 = vec_signed(FloatVector0);
+            auto IntegerOutVector1 = vec_signed(FloatVector1);
+            auto IntegerOutVector2 = vec_signed(FloatVector2);
+            auto IntegerOutVector3 = vec_signed(FloatVector3);
+
+            IntegerOutVector0 = IntegerOutVector0 + ZeroPointVector;
+            IntegerOutVector1 = IntegerOutVector1 + ZeroPointVector;
+            IntegerOutVector2 = IntegerOutVector2 + ZeroPointVector;
+            IntegerOutVector3 = IntegerOutVector3 + ZeroPointVector;
+
+            auto ShortVector0 = vec_pack(IntegerOutVector0, IntegerOutVector1);
+            auto ShortVector1 = vec_pack(IntegerOutVector2, IntegerOutVector3);
+            auto CharVector = vec_pack(ShortVector0, ShortVector1);
+
+            // Workaround to avoid 'variable set but not used' message
+            MLAS_UNREFERENCED_PARAMETER(CharVector);
+
+            vec_xst(CharVector, 0, (int8_t *) RowOutput);
+            RowOutput += 16;
+            n -= 16;
+        }
+
+        while (n >= 4) {
+            int8_t OutputBuffer[16];
+
+            auto IntegerVector = vec_xl(0, &RowInput[0]);
+            RowInput += 4;
+
+            if (bias != nullptr) {
+                IntegerVector = IntegerVector + vec_xl(0, &bias[0]);
+                bias += 4;
+            }
+
+            auto FloatVector = vec_float(IntegerVector);
+
+            if (scale != nullptr) {
+                FloatVector = FloatVector * vec_xl(0, scale);
+                scale += 4;
+            } else {
+                FloatVector = FloatVector * PerMatrixScaleVector;
+            }
+
+            FloatVector = vec_max(FloatVector, MinimumVector);
+            FloatVector = vec_min(FloatVector, MaximumVector);
+            FloatVector = vec_round(FloatVector);
+
+            auto IntegerOutVector = vec_signed(FloatVector);
+            IntegerOutVector = IntegerOutVector + ZeroPointVector;
+
+            auto ShortVector = vec_pack(IntegerOutVector, vec_splats((int32_t) 0));
+            auto CharVector = vec_pack(ShortVector, vec_splats((int16_t) 0));
+
+            // Workaround to avoid 'variable set but not used' message
+            MLAS_UNREFERENCED_PARAMETER(CharVector);
+
+            vec_xst(CharVector, 0, &(OutputBuffer[0]));
+            memcpy(RowOutput, OutputBuffer, 4);
+
+            RowOutput += 4;
+            n -= 4;
+        }
+
+        while (n > 0) {
+            auto IntegerValue = RowInput[0];
+            RowInput += 1;
+
+            if (bias != nullptr) {
+                IntegerValue += bias[0];
+                bias += 1;
+            }
+
+            float FloatValue = float(IntegerValue);
+            float ScaleValue = PerColumnScale ? *scale++ : PerMatrixScaleValue;
+
+            FloatValue *= ScaleValue;
+            FloatValue = std::max(FloatValue, MinimumValue);
+            FloatValue = std::min(FloatValue, MaximumValue);
+
+            IntegerValue = int32_t(MlasBitsOfFp32(FloatValue + MLAS_ROUNDING_BIAS_MAGIC)) -
+                MLAS_ROUNDING_BIAS_MAGIC_BITS;
+
+            *RowOutput++ = OutputType(IntegerValue + ZeroPoint);
+
+            n -= 1;
+        }
+
+        // Next Row
+        Input += InputLeadingDimension;
+        Output += OutputLeadingDimension;
+    }
+}
+
 #elif defined(MLAS_LSX_INTRINSICS)
 
 template <typename OutputType>
@@ -1510,8 +1902,8 @@ MlasRequantizeOutput(
     float min_f = float(std::numeric_limits<OutputType>::lowest() - ZeroPoint);
     float max_f = float(std::numeric_limits<OutputType>::max() - ZeroPoint);
     const __m128 PerMatrixScaleVector = PerColumnScale ? MlasReinterpretAsFloat32x4(__lsx_vldi(0)) : MlasReinterpretAsFloat32x4(__lsx_vldrepl_w(Scale, 0));
-    const __m128 MinimumValueVector = MlasReinterpretAsFloat32x4(__lsx_vreplgr2vr_w( *((uint32_t*)&min_f)));
-    const __m128 MaximumValueVector = MlasReinterpretAsFloat32x4(__lsx_vreplgr2vr_w( *((uint32_t*)&max_f)));
+    const __m128 MinimumValueVector = MlasReinterpretAsFloat32x4((__m128i)(v4f32){min_f,min_f,min_f,min_f});
+    const __m128 MaximumValueVector = MlasReinterpretAsFloat32x4((__m128i)(v4f32){max_f,max_f,max_f,max_f});
     const __m128i ZeroPointVector = __lsx_vreplgr2vr_w(ZeroPoint);
 
     if (nullptr != Bias) {
@@ -1919,7 +2311,7 @@ Return Value:
 
 --*/
 {
-#if defined(MLAS_TARGET_AMD64)
+#if defined(MLAS_TARGET_AMD64) || defined(MLAS_USE_SVE)
     GetMlasPlatform().ReduceMinimumMaximumF32Kernel(Input, Min, Max, N);
 #else
     MlasReduceMinimumMaximumF32Kernel(Input, Min, Max, N);

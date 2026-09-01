@@ -24,8 +24,8 @@ struct TensorRTCustomKernel {
       : compute_stream_(compute_stream) {
   }
 
-  void Compute(OrtKernelContext* /*context*/){
-      // The implementation is in TensorRT plugin. No need to implement it here.
+  void Compute(OrtKernelContext* /*context*/) {
+    // The implementation is in TensorRT plugin. No need to implement it here.
   };
 
  private:
@@ -78,7 +78,7 @@ struct TensorRTCustomOp : Ort::CustomOpBase<TensorRTCustomOp, TensorRTCustomKern
  private:
   const char* provider_{onnxruntime::kTensorrtExecutionProvider};
   void* compute_stream_;
-  const char* name_;
+  const char* name_ = nullptr;
   size_t num_inputs_ = 1;   // set to 1 to match with default min_arity for variadic input
   size_t num_outputs_ = 1;  // set to 1 to match with default min_arity for variadic output
 };

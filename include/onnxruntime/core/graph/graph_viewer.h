@@ -2,10 +2,11 @@
 // Licensed under the MIT License.
 
 #pragma once
+#include <unordered_set>
+#include <filesystem>
 
 #include "core/graph/graph.h"
 #include "core/framework/session_options.h"
-#include <unordered_set>
 
 namespace onnxruntime {
 class Function;
@@ -43,7 +44,7 @@ class GraphViewer {
   const std::string& Description() const noexcept;
 
   /** Gets the path of the owning model if any **/
-  const Path& ModelPath() const noexcept { return graph_->ModelPath(); }
+  const std::filesystem::path& ModelPath() const noexcept { return graph_->ModelPath(); }
 
   /**
   Gets a tensor created from an initializer.
@@ -55,6 +56,11 @@ class GraphViewer {
 
   /** Returns true if an initializer value can be overridden by a graph input with the same name. */
   bool CanOverrideInitializer() const noexcept;
+
+  /** Returns the ONNX IR version for the model. */
+  Version GetOnnxIRVersion() const noexcept {
+    return graph_->GetOnnxIRVersion();
+  }
 
   /**
   Gets the Graph inputs, excluding initializers.
@@ -192,6 +198,12 @@ class GraphViewer {
   IOnnxRuntimeOpSchemaCollectionPtr GetSchemaRegistry() const { return graph_->GetSchemaRegistry(); }
 #endif
 
+  /** Populate `value` if an externally allocated OrtValue exists for an initializer with the given name.
+   */
+  bool GetOrtValueInitializer(const std::string& name, OrtValue& value) const {
+    return graph_->GetOrtValueInitializer(name, value);
+  }
+
  private:
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(GraphViewer);
   GraphViewer(const Graph& graph, const IndexedSubGraph* filter_info);
@@ -205,6 +217,11 @@ class GraphViewer {
 #if !defined(ORT_MINIMAL_BUILD)
   // The NodeIndex values of the graph nodes sorted in topological order with priority.
   std::vector<NodeIndex> nodes_in_topological_order_with_priority_;
+#endif
+
+#ifdef ENABLE_TRAINING
+  // The NodeIndex values of the graph nodes sorted in memory efficient topological order.
+  std::vector<NodeIndex> nodes_in_mem_efficient_topological_order_;
 #endif
 
   // Graph root nodes.

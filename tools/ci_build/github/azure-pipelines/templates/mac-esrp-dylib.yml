@@ -1,13 +1,5 @@
 parameters:
-- name: DoEsrp
-  type: boolean
-  default: true
-
 - name: FolderPath
-  type: string
-  default: ''
-
-- name: DisplayName
   type: string
   default: ''
 
@@ -16,42 +8,28 @@ parameters:
   default: '*.zip'
 
 steps:
-- task: EsrpCodeSigning@3
-  displayName: ${{ parameters.DisplayName }}
-  condition: and(succeeded(), eq('${{ parameters.DoEsrp }}', true))
+- task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@5
+  displayName: 'ESRP CodeSigning'
   inputs:
-    ConnectedServiceName: 'OnnxRuntime CodeSign 20190817'
+    ConnectedServiceName: 'OnnxrunTimeCodeSign_20240611'
+    UseMSIAuthentication: true
+    AppRegistrationClientId: '62b7cfed-4d25-454f-880e-010dc21455ac'
+    AppRegistrationTenantId: '975f013f-7f24-47e8-a7d3-abc4752bf346'
+    EsrpClientId: "53d54d02-978d-4305-8572-583cf6711c4f"
+    AuthAKVName: 'ortbuildkeyvault'
+    AuthSignCertName: 'esrpcodesign'
     FolderPath: ${{ parameters.FolderPath }}
     Pattern: ${{ parameters.Pattern }}
+    SessionTimeout: 90
+    ServiceEndpointUrl: 'https://api.esrp.microsoft.com/api/v2'
+    MaxConcurrency: 25
     signConfigType: inlineSignParams
     inlineOperation: |
       [
         {
           "keyCode": "CP-401337-Apple",
           "operationSetCode": "MacAppDeveloperSign",
-          "parameters": [
-            {
-              "parameterName": "OpusName",
-              "parameterValue": "Microsoft"
-            },
-            {
-              "parameterName": "OpusInfo",
-              "parameterValue": "http://www.microsoft.com"
-            },
-            {
-              "parameterName": "PageHash",
-              "parameterValue": "/NPH"
-            },
-            {
-              "parameterName": "FileDigest",
-              "parameterValue": "/fd sha256"
-            },
-            {
-              "parameterName": "TimeStamp",
-              "parameterValue": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
-            }
-          ],
           "toolName": "sign",
-          "toolVersion": "1.0"
+          "toolVersion": "6.2.9304.0"
         }
       ]

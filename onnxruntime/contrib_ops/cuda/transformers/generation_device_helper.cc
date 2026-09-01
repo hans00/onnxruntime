@@ -12,7 +12,7 @@
 #include "contrib_ops/cuda/bert/transformer_cuda_common.h"
 #include <cuda_runtime.h>
 #include "contrib_ops/cuda/transformers/generation_cuda_impl.h"
-#include "contrib_ops/cuda/transformers/dump_cuda_tensor.h"
+#include "contrib_ops/cuda/utils/dump_cuda_tensor.h"
 #include "contrib_ops/cpu/transformers/logits_processor.h"
 #include "contrib_ops/cpu/transformers/generation_shared.h"
 #include "contrib_ops/cpu/transformers/subgraph_t5_decoder.h"
@@ -21,7 +21,6 @@
 #include "contrib_ops/cuda/transformers/greedy_search_top_one.h"
 #include "core/providers/cuda/tensor/transpose.h"
 
-// the includes would be dummy for ROCm, we will ignore them for now
 #ifdef ENABLE_NVTX_PROFILE
 #include "core/providers/cuda/nvtx_profile.h"
 #include "core/providers/cuda/nvtx_profile_context.h"
@@ -53,7 +52,7 @@ namespace GenerationCudaDeviceHelper {
 // e.g In the case of past(fp32) -> cast to fp16 -> Attention(fp16), the reorder
 // function will use the fp32 chunk size and cause the model silently generates
 // the incorrect results.
-// TODO: Fix this issue. Either retrive the Attention op type from the graph or
+// TODO: Fix this issue. Either retrieve the Attention op type from the graph or
 // check the type of past state as graph input should be same as Attention op type.
 // It might be better to forcefully require the same type since cast node generates
 // extra overhead.
@@ -140,10 +139,12 @@ Status TopK(const Tensor* input, const int axis, const unsigned k, bool largest,
   output_indices = std::move(*Tensor::Create(DataTypeImpl::GetType<int64_t>(), output_shape, std::move(allocator)));
 
   Status result;
+  auto cuda_stream = stream ? static_cast<cudaStream_t>(stream->GetHandle()) : nullptr;
   if (input->IsDataType<float>()) {
     result = TopKImpl<float>(nullptr,  // We limit number of beams in BeamSearchParameters, so K <= 256 and use NULL here
                              false /*use_deterministic_compute*/,
-                             stream,
+                             cuda_stream,
+                             nullptr,  // alloc_stream not needed when kernel is nullptr
                              input->Data<float>(),
                              static_cast<float*>(output_values.MutableDataRaw()),
                              static_cast<int64_t*>(output_indices.MutableDataRaw()),
@@ -158,7 +159,8 @@ Status TopK(const Tensor* input, const int axis, const unsigned k, bool largest,
   } else if (input->IsDataType<MLFloat16>()) {
     result = TopKImpl<MLFloat16>(nullptr,
                                  false /*use_deterministic_compute*/,
-                                 stream,
+                                 cuda_stream,
+                                 nullptr,  // alloc_stream not needed when kernel is nullptr
                                  input->Data<MLFloat16>(),
                                  static_cast<MLFloat16*>(output_values.MutableDataRaw()),
                                  static_cast<int64_t*>(output_indices.MutableDataRaw()),
@@ -232,7 +234,7 @@ Status AddToFeeds(Stream* ort_stream,
     }
   }
   if (!buffer) {
-    buffer = IAllocator::MakeUniquePtr<char>(device_allocator, total_bytes, false, ort_stream, WaitCudaNotificationOnDevice);
+    buffer = IAllocator::MakeUniquePtr<char>(device_allocator, total_bytes, false, ort_stream);
   }
   char* gpu_data = buffer.get();
   CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(gpu_data, pinned_data, total_bytes, cudaMemcpyHostToDevice, stream));
@@ -332,7 +334,7 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
                      const transformers::IGenerationParameters* parameters,  // parameters
                      int step,                                               // iteration counter
                      Stream* ort_stream,                                     // cuda stream (for CUDA only)
-                     const transformers::IConsoleDumper* dumper) {           // tensor dumper
+                     const IConsoleDumper* dumper) {                         // tensor dumper
 
 #ifdef ENABLE_NVTX_PROFILE
   profile::NvtxNestedRangeCreator processLogitsRange("ProcessLogits", profile::Color::Red);
@@ -360,6 +362,10 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
   const TensorShape& logits_shape = logits.Get<Tensor>().Shape();
   ORT_ENFORCE(logits_shape.NumDimensions() == 3);
+  const auto logits_vocab_size = static_cast<int>(logits_shape[2]);
+  ORT_RETURN_IF_NOT(vocab_size > 0 && vocab_size <= logits_vocab_size,
+                    "BeamSearch: vocab_size attribute (", vocab_size,
+                    ") must be positive and not exceed decoder logits width (", logits_vocab_size, ")");
   auto input_length = logits_shape[1];
   auto logits_batch_size = logits_shape[0];
 
@@ -412,7 +418,7 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
   const CudaT* X_data = is_reuse_logits_buffer ? logits_data : reinterpret_cast<const CudaT*>(next_token_logits.data());
 
   ORT_RETURN_IF_ERROR((dispatch_blockwise_softmax_forward<CudaT, float, float, true>(
-      ort_stream, Y_data, X_data, vocab_size,
+      ort_stream ? static_cast<cudaStream_t>(ort_stream->GetHandle()) : nullptr, Y_data, X_data, vocab_size,
       is_reuse_logits_buffer ? padded_vocab_size : vocab_size,
       vocab_size,
       batch_size * num_beams)));
@@ -524,7 +530,8 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
     beam_state->remaining_scores = beam_state->remaining_scores.subspan(next_token_scores.size());
   }
 
-  if (num_beams <= 32) {
+  gsl::span<float> scores_to_process = beam_state->next_scores;
+  if (parameters->use_fast_topk && num_beams <= 32) {
     constexpr size_t max_parts_of_vocab = 128;
     size_t candidate_count = SafeInt<size_t>(batch_beam_size) * 2 * num_beams;
     float* topk_tmp_buffer = beam_state->topk_buffer.data();
@@ -546,13 +553,6 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
                          beam_state->next_tokens.data(),
                          beam_state->next_indices.data(),
                          cuda_stream);
-
-    // Select [batch_size, 2 * num_beams] from [batch_size * num_beams, 2 * num_beams]
-#ifdef DEBUG_GENERATION
-    dumper->Print("next_tokens before scorer", beam_state->next_tokens.data(), batch_size, 2 * num_beams);
-    dumper->Print("next_indices before scorer", beam_state->next_indices.data(), batch_size, 2 * num_beams);
-    dumper->Print("next_scores before scorer", beam_state->next_scores.data(), batch_size, 2 * num_beams);
-#endif
   } else {
     // Apply top-k selection like the following:
     //   next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
@@ -588,17 +588,19 @@ Status ProcessLogits(const OrtValue& logits,                                 // 
     cuda::LaunchNextTokenKernel(next_token_indices, beam_state->next_indices.data(), beam_state->next_tokens.data(),
                                 batch_size, top_k, vocab_size, cuda_stream);
 
-#ifdef DEBUG_GENERATION
-    dumper->Print("next_scores before scorer", topk_scores->Data<float>(), batch_size, top_k);
-    dumper->Print("next_tokens before scorer", beam_state->next_tokens.data(), batch_size, top_k);
-    dumper->Print("next_indices before scorer", beam_state->next_indices.data(), batch_size, top_k);
-#endif
+    scores_to_process = gsl::span<float>(topk_scores->MutableData<float>(), batch_size * top_k);
   }
 
   // gsl::span doesn't convert from non const to const, so all we're doing here is making each const.
-  gsl::span<const float> next_scores(beam_state->next_scores.data(), beam_state->next_scores.size());
+  gsl::span<const float> next_scores(scores_to_process.data(), scores_to_process.size());
   gsl::span<const int32_t> next_tokens(beam_state->next_tokens.data(), beam_state->next_tokens.size());
   gsl::span<const int32_t> next_indices(beam_state->next_indices.data(), beam_state->next_indices.size());
+
+#ifdef DEBUG_GENERATION
+  dumper->Print("next_scores before scorer", next_scores.data(), batch_size, 2 * num_beams);
+  dumper->Print("next_tokens before scorer", next_tokens.data(), batch_size, 2 * num_beams);
+  dumper->Print("next_indices before scorer", next_indices.data(), batch_size, 2 * num_beams);
+#endif
 
   beam_scorer->Process(
       *sequences,
@@ -689,10 +691,10 @@ CudaBeamSearchScorer::CudaBeamSearchScorer(const transformers::IGenerationParame
   CUDA_CALL_THROW(cudaEventCreate(&event_process_complete_.Get()));
 
   state_cpu_ = AllocateCPUPinned<cuda::BeamScorerState>();
-  state_cpu_->batch_size_ = static_cast<size_t>(parameters.batch_size);
-  state_cpu_->num_beams_ = static_cast<size_t>(parameters.num_beams);
-  state_cpu_->max_length_ = static_cast<size_t>(parameters.max_length);
-  state_cpu_->num_return_sequences_ = static_cast<size_t>(parameters.num_return_sequences);
+  state_cpu_->batch_size_ = static_cast<int>(parameters.batch_size);
+  state_cpu_->num_beams_ = static_cast<int>(parameters.num_beams);
+  state_cpu_->max_length_ = static_cast<int>(parameters.max_length);
+  state_cpu_->num_return_sequences_ = static_cast<int>(parameters.num_return_sequences);
   state_cpu_->pad_token_id_ = parameters.pad_token_id;
   state_cpu_->eos_token_id_ = parameters.eos_token_id;
   state_cpu_->early_stopping_ = parameters.early_stopping;
@@ -735,6 +737,7 @@ void CudaBeamSearchScorer::Process(transformers::ISequences& sequences,
                                        next_tokens,
                                        next_indices,
                                        stream_);
+
   CUDA_CALL_THROW(cudaEventRecord(event_process_complete_.Get(), stream_));
 
   cuda::LaunchBeamSearchScorer_AppendNextTokenToSequences(*state_cpu_,
@@ -824,7 +827,7 @@ Status GreedySearchProcessLogits(
     bool do_sampling,                                       // whether to do sampling
     int step,                                               // iteration counter
     Stream* stream,                                         // cuda stream (for CUDA only)
-    const transformers::IConsoleDumper* dumper) {           // tensor dumper
+    const IConsoleDumper* dumper) {                         // tensor dumper
 
 #ifdef ENABLE_NVTX_PROFILE
   profile::NvtxNestedRangeCreator processLogitsRange("ProcessLogits", profile::Color::Red);
@@ -850,6 +853,10 @@ Status GreedySearchProcessLogits(
   // where input_length equals to parameters_->sequence_length for first subgraph call, and 1 for the remaining calls.
   const TensorShape& logits_shape = logits.Get<Tensor>().Shape();
   ORT_ENFORCE(logits_shape.NumDimensions() == 3);
+  const auto logits_vocab_size = static_cast<int>(logits_shape[2]);
+  ORT_RETURN_IF_NOT(vocab_size > 0 && vocab_size <= logits_vocab_size,
+                    "GreedySearch: vocab_size attribute (", vocab_size,
+                    ") must be positive and not exceed decoder logits width (", logits_vocab_size, ")");
   auto input_length = logits_shape[1];
 
   // NOTE: `padded_vocab_size` MAY be different from `vocab_size`.
@@ -1242,7 +1249,7 @@ Status UpdateDecoderFeeds(
     bool past_present_share_buffer,
     bool need_cache_indir,
     transformers::Sequences& sequences,
-    const transformers::IConsoleDumper* dumper) {
+    const IConsoleDumper* dumper) {
   // last_outputs: logits, present_key_self_0, present_value_self_0, ...
   // next_inputs: input_ids,
   //              encoder_attention_mask, encoder_hidden_states,
@@ -1264,16 +1271,14 @@ Status UpdateDecoderFeeds(
     CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(input_ids_data, beam_next_tokens.data(), beam_next_tokens.size_bytes(),
                                          cudaMemcpyHostToDevice, cuda_stream));
   } else {
-    for (int i = 0; i < batch_beam_size; i++) {
-      gsl::span<const int32_t> sequence = sequences.GetSequence(i);
-      const int32_t* sequence_data = sequence.data();
-      CUDA_RETURN_IF_ERROR(
-          cudaMemcpyAsync(input_ids_data + static_cast<ptrdiff_t>(i) * current_length,
-                          sequence_data,
-                          current_length * sizeof(int32_t),
-                          cudaMemcpyHostToDevice,
-                          cuda_stream));
-    }
+    // We expect sequences to point directly to device memory
+    int max_length = sequences.GetMaxLength();
+    auto sequences_buffer = sequences.GetCurrentDeviceSequences();
+    CUDA_RETURN_IF_ERROR(
+        cudaMemcpy2DAsync(input_ids_data, current_length * sizeof(int32_t),
+                          sequences_buffer.data(), max_length * sizeof(int32_t),
+                          current_length * sizeof(int32_t), batch_beam_size,
+                          cudaMemcpyDeviceToDevice, cuda_stream));
   }
   next_inputs[0] = input_ids;
 
@@ -1365,6 +1370,7 @@ Status ExpandBuffer(Stream* ort_stream,
   // Input shape (batch_size, xxx). The input is required with data type T.
   // Output shape (batch_size * num_beams, xxx)
   const TensorShape& input_shape = input.Get<Tensor>().Shape();
+
   const int64_t& batch_size = input_shape[0];
   int64_t sequence_length = 0;
 
@@ -1448,7 +1454,7 @@ template Status ProcessLogits<float>(
     const transformers::IGenerationParameters* parameters,
     int step,
     Stream* ort_stream,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status GreedySearchProcessLogits<float>(
     const OrtValue& logits,
@@ -1462,7 +1468,7 @@ template Status GreedySearchProcessLogits<float>(
     bool do_sampling,
     int step,
     Stream* ort_stream,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status DeviceCopy<float>(
     gsl::span<float> target,
@@ -1519,7 +1525,7 @@ template Status ProcessLogits<MLFloat16>(
     const transformers::IGenerationParameters* parameters,
     int step,
     Stream* ort_stream,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status GreedySearchProcessLogits<MLFloat16>(
     const OrtValue& logits,
@@ -1533,7 +1539,7 @@ template Status GreedySearchProcessLogits<MLFloat16>(
     bool do_sampling,
     int step,
     Stream* ort_stream,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status UpdateGptFeeds<MLFloat16>(
     AllocatorPtr allocator,
@@ -1572,7 +1578,7 @@ template Status UpdateDecoderFeeds<float>(
     bool past_present_share_buffer,
     bool need_cache_indir,
     transformers::Sequences& sequences,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status UpdateDecoderFeeds<MLFloat16>(
     AllocatorPtr allocator,
@@ -1592,7 +1598,7 @@ template Status UpdateDecoderFeeds<MLFloat16>(
     bool past_present_share_buffer,
     bool need_cache_indir,
     transformers::Sequences& sequences,
-    const transformers::IConsoleDumper* dumper);
+    const IConsoleDumper* dumper);
 
 template Status ExpandBuffer<int32_t>(
     Stream* ort_stream,

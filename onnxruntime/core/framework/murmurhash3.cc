@@ -15,7 +15,9 @@
 
 /* Modifications Copyright (c) Microsoft. */
 
-#include "core/framework/endian.h"
+#include "core/common/endian.h"
+
+#include "core/util/force_inline.h"
 
 //-----------------------------------------------------------------------------
 // Platform-specific functions and macros
@@ -23,8 +25,6 @@
 // Microsoft Visual Studio
 
 #if defined(_MSC_VER)
-
-#define FORCE_INLINE __forceinline
 
 #include <stdlib.h>
 
@@ -36,8 +36,6 @@
 // Other compilers
 
 #else  // defined(_MSC_VER)
-
-#define FORCE_INLINE inline __attribute__((always_inline))
 
 inline uint32_t rotl32(uint32_t x, int8_t r) {
   return (x << r) | (x >> (32 - r));
@@ -61,7 +59,7 @@ inline uint64_t rotl64(uint64_t x, int8_t r) {
 //
 // Changes to support big-endian from https://github.com/explosion/murmurhash/pull/27/
 // were manually applied to original murmurhash3 source code.
-FORCE_INLINE uint32_t getblock32(const uint32_t* p, int i) {
+ORT_FORCEINLINE uint32_t getblock32(const uint32_t* p, ptrdiff_t i) {
   if constexpr (onnxruntime::endian::native == onnxruntime::endian::little) {
     return p[i];
   } else {
@@ -73,7 +71,7 @@ FORCE_INLINE uint32_t getblock32(const uint32_t* p, int i) {
   }
 }
 
-FORCE_INLINE uint64_t getblock64(const uint64_t* p, int i) {
+ORT_FORCEINLINE uint64_t getblock64(const uint64_t* p, ptrdiff_t i) {
   if constexpr (onnxruntime::endian::native == onnxruntime::endian::little) {
     return p[i];
   } else {
@@ -92,7 +90,7 @@ FORCE_INLINE uint64_t getblock64(const uint64_t* p, int i) {
 //-----------------------------------------------------------------------------
 // Finalization mix - force all bits of a hash block to avalanche
 
-FORCE_INLINE constexpr uint32_t fmix32(uint32_t h) {
+ORT_FORCEINLINE constexpr uint32_t fmix32(uint32_t h) {
   h ^= h >> 16;
   h *= 0x85ebca6b;
   h ^= h >> 13;
@@ -104,7 +102,7 @@ FORCE_INLINE constexpr uint32_t fmix32(uint32_t h) {
 
 //----------
 
-FORCE_INLINE constexpr uint64_t fmix64(uint64_t k) {
+ORT_FORCEINLINE constexpr uint64_t fmix64(uint64_t k) {
   k ^= k >> 33;
   k *= BIG_CONSTANT(0xff51afd7ed558ccd);
   k ^= k >> 33;
@@ -117,10 +115,10 @@ FORCE_INLINE constexpr uint64_t fmix64(uint64_t k) {
 //-----------------------------------------------------------------------------
 
 namespace onnxruntime {
-void MurmurHash3::x86_32(const void* key, int len,
+void MurmurHash3::x86_32(const void* key, size_t len,
                          uint32_t seed, void* out) {
   const uint8_t* data = (const uint8_t*)key;
-  const int nblocks = len / 4;
+  const auto nblocks = static_cast<ptrdiff_t>(len / 4U);
 
   uint32_t h1 = seed;
 
@@ -130,9 +128,9 @@ void MurmurHash3::x86_32(const void* key, int len,
   //----------
   // body
 
-  const uint32_t* blocks = (const uint32_t*)(data + static_cast<ptrdiff_t>(nblocks) * 4);
+  const uint32_t* blocks = (const uint32_t*)(data + nblocks * 4);
 
-  for (int i = -nblocks; i; i++) {
+  for (auto i = -nblocks; i; i++) {
     uint32_t k1 = getblock32(blocks, i);
 
     k1 *= c1;
@@ -147,7 +145,7 @@ void MurmurHash3::x86_32(const void* key, int len,
   //----------
   // tail
 
-  const uint8_t* tail = (const uint8_t*)(data + static_cast<ptrdiff_t>(nblocks) * 4);
+  const uint8_t* tail = (const uint8_t*)(data + nblocks * 4);
 
   uint32_t k1 = 0;
 
@@ -178,9 +176,9 @@ void MurmurHash3::x86_32(const void* key, int len,
 
 //-----------------------------------------------------------------------------
 
-void MurmurHash3::x86_128(const void* key, int len, uint32_t seed, void* out) {
+void MurmurHash3::x86_128(const void* key, size_t len, uint32_t seed, void* out) {
   const uint8_t* data = (const uint8_t*)key;
-  const int nblocks = len / 16;
+  const auto nblocks = static_cast<ptrdiff_t>(len / 16U);
 
   uint32_t h1 = seed;
   uint32_t h2 = seed;
@@ -195,9 +193,9 @@ void MurmurHash3::x86_128(const void* key, int len, uint32_t seed, void* out) {
   //----------
   // body
 
-  const uint32_t* blocks = (const uint32_t*)(data + static_cast<ptrdiff_t>(nblocks) * 16);
+  const uint32_t* blocks = (const uint32_t*)(data + nblocks * 16);
 
-  for (int i = -nblocks; i; i++) {
+  for (auto i = -nblocks; i; i++) {
     uint32_t k1 = getblock32(blocks, i * 4 + 0);
     uint32_t k2 = getblock32(blocks, i * 4 + 1);
     uint32_t k3 = getblock32(blocks, i * 4 + 2);
@@ -243,7 +241,7 @@ void MurmurHash3::x86_128(const void* key, int len, uint32_t seed, void* out) {
   //----------
   // tail
 
-  const uint8_t* tail = (const uint8_t*)(data + static_cast<ptrdiff_t>(nblocks) * 16);
+  const uint8_t* tail = (const uint8_t*)(data + nblocks * 16);
 
   uint32_t k1 = 0;
   uint32_t k2 = 0;

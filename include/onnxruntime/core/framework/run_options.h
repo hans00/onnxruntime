@@ -5,8 +5,16 @@
 
 #include <string>
 #include <atomic>
+
+#include "core/common/inlined_containers_fwd.h"
 #include "core/session/onnxruntime_c_api.h"
 #include "core/framework/config_options.h"
+
+namespace onnxruntime {
+namespace lora {
+class LoraAdapter;
+}
+}  // namespace onnxruntime
 
 /**
  * Configuration information for a Run call.
@@ -27,6 +35,14 @@ struct OrtRunOptions {
   // So it is possible that only some of the nodes are executed.
   bool only_execute_path_to_fetches = false;
 
+  // Set to 'true' to enable profiling for this run.
+  bool enable_profiling = false;
+
+  // File prefix for profiling result for this run.
+  // The actual filename will be: <profile_file_prefix>_<timestamp>.json
+  // Only used when enable_profiling is true.
+  std::basic_string<ORTCHAR_T> profile_file_prefix = ORT_TSTR("onnxruntime_run_profile");
+
 #ifdef ENABLE_TRAINING
   // Used by onnxruntime::training::TrainingSession. This class is now deprecated.
   // Delete training_mode when TrainingSession is deleted.
@@ -35,10 +51,18 @@ struct OrtRunOptions {
 #endif
 
   // Stores the configurations for this run
-  // To add an configuration to this specific run, call OrtApis::AddRunConfigEntry
+  // To add a configuration value to this specific run, call OrtApis::AddRunConfigEntry
+  // To get a configuration value, call OrtApis::GetRunConfigEntry
   // The configuration keys and value formats are defined in
   // /include/onnxruntime/core/session/onnxruntime_run_options_config_keys.h
   onnxruntime::ConfigOptions config_options;
+
+  onnxruntime::InlinedVector<const onnxruntime::lora::LoraAdapter*> active_adapters;
+
+  // Optional sync stream for external resource import.
+  // When set, the EP uses this stream for execution, enabling proper
+  // synchronization with imported external semaphores.
+  OrtSyncStream* sync_stream = nullptr;
 
   OrtRunOptions() = default;
   ~OrtRunOptions() = default;

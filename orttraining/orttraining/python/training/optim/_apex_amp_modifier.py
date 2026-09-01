@@ -22,11 +22,11 @@ class ApexAMPModifier(FP16OptimizerModifier):
         )
 
     def override_function(m_self):  # noqa: N805
-        from apex import amp as apex_amp
+        from apex import amp as apex_amp  # noqa: PLC0415
 
-        from onnxruntime.training.ortmodule.torch_cpp_extensions import fused_ops
+        from onnxruntime.training.ortmodule.torch_cpp_extensions import fused_ops  # noqa: PLC0415
 
-        warnings.warn("Apex AMP fp16_optimizer functions are overrided with faster implementation.", UserWarning)
+        warnings.warn("Apex AMP fp16_optimizer functions are overridden with faster implementation.", UserWarning)
 
         # Implementation adapted from https://github.com/NVIDIA/apex/blob/082f999a6e18a3d02306e27482cc7486dab71a50/apex/amp/_process_optimizer.py#L161
         def post_backward_with_master_weights(self, scaler):
@@ -99,7 +99,7 @@ class ApexAMPModifier(FP16OptimizerModifier):
                 scaler, stash.all_fp32_from_fp32_params, stash.all_fp32_from_fp32_grad_stash
             )
 
-        from apex.optimizers import FusedSGD
+        from apex.optimizers import FusedSGD  # noqa: PLC0415
 
         if not isinstance(m_self._optimizer, FusedSGD):
             m_self._optimizer._post_amp_backward = types.MethodType(

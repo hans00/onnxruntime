@@ -17,6 +17,24 @@
       "preLaunchTask": "tsc: build - common/test/tsconfig.json"
     },
     {
+      "name": "[node] Launch installation script",
+      "program": "${workspaceFolder}/node/script/install.js",
+      "request": "launch",
+      "skipFiles": ["<node_internals>/**"],
+      "type": "node",
+      "cwd": "${workspaceFolder}/node",
+      "args": ["--onnxruntime-node-install"]
+    },
+    {
+      "name": "[web] Launch Build script in Node.js",
+      "program": "${workspaceFolder}/web/script/build.js",
+      "request": "launch",
+      "skipFiles": ["<node_internals>/**"],
+      "type": "node",
+      "cwd": "${workspaceFolder}/web",
+      "preLaunchTask": "tsc: build - web/script/tsconfig.json"
+    },
+    {
       "name": "[web] Launch Test Runner CLI in Node.js",
       "program": "${workspaceFolder}/web/script/test-runner-cli.js",
       "request": "launch",

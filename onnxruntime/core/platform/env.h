@@ -22,11 +22,10 @@ limitations under the License.
 #include <string>
 #include <unordered_map>
 #include <vector>
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 #include "core/common/common.h"
 #include "core/common/path_string.h"
-#include "core/framework/callback.h"
 #include "core/platform/env_time.h"
 #include "core/platform/telemetry.h"
 #include "core/session/onnxruntime_c_api.h"
@@ -91,10 +90,23 @@ struct ThreadOptions {
   void* custom_thread_creation_options = nullptr;
   OrtCustomJoinThreadFn custom_join_thread_fn = nullptr;
   int dynamic_block_base_ = 0;
+
+#ifdef ORT_ENABLE_SESSION_THREADPOOL_CALLBACKS
+  // Optional callbacks for thread pool work scheduling.
+  // The pointed-to struct must remain valid until the ThreadPool constructor returns
+  // (the constructor copies the callback values).
+  const OrtThreadPoolCallbacksConfig* work_callbacks = nullptr;
+#endif
 };
 
 std::ostream& operator<<(std::ostream& os, const LogicalProcessors&);
 std::ostream& operator<<(std::ostream& os, gsl::span<const LogicalProcessors>);
+
+/// <summary>
+/// Get errno and the corresponding error message.
+/// </summary>
+/// <returns>errno and the error message string if errno indicates an error.</returns>
+std::pair<int, std::string> GetErrnoInfo();
 
 /// \brief An interface used by the onnxruntime implementation to
 /// access operating system functionality like the filesystem etc.
@@ -141,6 +153,8 @@ class Env {
 
   virtual std::vector<LogicalProcessors> GetDefaultThreadAffinities() const = 0;
 
+  virtual int GetL2CacheSize() const = 0;
+
   /// \brief Returns the number of micro-seconds since the Unix epoch.
   virtual uint64_t NowMicros() const {
     return env_time_->NowMicros();
@@ -171,7 +185,7 @@ class Env {
   virtual common::Status ReadFileIntoBuffer(_In_z_ const ORTCHAR_T* file_path, FileOffsetType offset, size_t length,
                                             gsl::span<char> buffer) const = 0;
 
-  using MappedMemoryPtr = std::unique_ptr<char[], OrtCallbackInvoker>;
+  using MappedMemoryPtr = std::unique_ptr<char[], std::function<void(void*)>>;
 
   /**
    * Maps the content of the file into memory.
@@ -189,6 +203,7 @@ class Env {
 #ifdef _WIN32
   /// \brief Returns true if the directory exists.
   virtual bool FolderExists(const std::wstring& path) const = 0;
+  virtual bool FileExists(const std::wstring& path) const = 0;
   /// \brief Recursively creates the directory, if it doesn't exist.
   virtual common::Status CreateFolder(const std::wstring& path) const = 0;
   // Mainly for use with protobuf library
@@ -198,6 +213,7 @@ class Env {
 #endif
   /// \brief Returns true if the directory exists.
   virtual bool FolderExists(const std::string& path) const = 0;
+  virtual bool FileExists(const std::string& path) const = 0;
   /// \brief Recursively creates the directory, if it doesn't exist.
   virtual common::Status CreateFolder(const std::string& path) const = 0;
   // Recursively deletes the directory and its contents.
@@ -212,6 +228,12 @@ class Env {
 
   /** Gets the canonical form of a file path (symlinks resolved). */
   virtual common::Status GetCanonicalPath(
+      const PathString& path,
+      PathString& canonical_path) const = 0;
+
+  /** Like GetCanonicalPath, but the path is not required to exist. Mirrors
+   *  std::filesystem::weakly_canonical. */
+  virtual common::Status GetWeaklyCanonicalPath(
       const PathString& path,
       PathString& canonical_path) const = 0;
 
@@ -236,9 +258,9 @@ class Env {
 
   // \brief Gets the file path of the onnx runtime code
   //
-  // Used to help load other shared libraries that live in the same folder as the core code, for example
-  // The DNNL provider shared library. Without this path, the module won't be found on windows in all cases.
-  virtual PathString GetRuntimePath() const { return PathString(); }
+  // Used to help load other shared libraries that live in the same folder as the core code.
+  // For example, the DNNL provider shared library.
+  virtual PathString GetRuntimePath() const = 0;
 
   // \brief Get a pointer to a symbol from a dynamic library.
   //

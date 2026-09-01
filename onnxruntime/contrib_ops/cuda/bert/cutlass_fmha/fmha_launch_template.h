@@ -10,7 +10,7 @@
 #endif
 
 #include "contrib_ops/cuda/bert/cutlass_fmha/memory_efficient_attention.h"
-#include "41_fused_multi_head_attention/kernel_forward.h"
+#include "contrib_ops/cuda/bert/cutlass_fmha/kernel_forward.h"
 
 namespace onnxruntime {
 namespace contrib {
@@ -42,7 +42,6 @@ struct RightPaddingBatchHook {
 
     auto lse_dim = ceil_div((int32_t)(p.num_queries), kAlignLSE) * kAlignLSE;
 
-    // Advance to current batch - in case of different sequence lengths
     if (p.seqlen_k_ptr) {
       p.num_keys = p.seqlen_k_ptr[batch_id];
     }
@@ -75,12 +74,10 @@ struct RightPaddingBatchHook {
           batch_id * lse_dim * p.num_heads + head_id * lse_dim + query_start;
     }
 
-    // Custom masking
-    if (p.causal_diagonal_ptr) {
-      p.causal_diagonal_offset = p.causal_diagonal_ptr[batch_id];
-    }
     if (p.custom_mask_type == AttentionKernel::CausalFromBottomRight) {
-      p.causal_diagonal_offset += p.num_keys - p.num_queries;
+      // May be negative when num_keys < num_queries (nonpad external KV cache, onnx#8068 / ORT #28904).
+      // causal_diagonal_offset is int32_t so the negative value is preserved (no unsigned wrap).
+      p.causal_diagonal_offset = p.num_keys - p.num_queries;
     }
     if (p.custom_mask_type == AttentionKernel::CausalFromTopLeft ||
         p.custom_mask_type == AttentionKernel::CausalFromBottomRight) {
@@ -143,18 +140,20 @@ __global__ void __launch_bounds__(AK::kNumThreads, AK::kMinBlocksPerSm)
   AK::attention_kernel(p);
 }
 
-template <typename T, typename ArchTag, bool is_aligned, int queries_per_block, int keys_per_block, bool single_value_iteration>
+template <typename T, typename ArchTag, bool is_aligned, int queries_per_block, int keys_per_block, int max_head_size>
 void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
-  using Attention = AttentionKernel<T, ArchTag, is_aligned, queries_per_block, keys_per_block, single_value_iteration>;
+  constexpr bool dropout = false;
+  using Attention = AttentionKernel<T, ArchTag, is_aligned, queries_per_block, keys_per_block, max_head_size, dropout>;
+
   typename Attention::Params p;
   {  // set parameters
     p.query_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.query));
     p.key_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.key));
     p.value_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.value));
     p.attn_bias_ptr = const_cast<T*>(reinterpret_cast<const T*>(params.attn_bias));
-    p.seqstart_q_ptr = params.seqstart_q_ptr;
-    p.seqstart_k_ptr = params.seqstart_k_ptr;
-    p.seqlen_k_ptr = params.seqlen_k_ptr;
+    p.seqstart_q_ptr = const_cast<int32_t*>(params.seqstart_q_ptr);
+    p.seqstart_k_ptr = const_cast<int32_t*>(params.seqstart_k_ptr);
+    p.seqlen_k_ptr = const_cast<int32_t*>(params.seqlen_k_ptr);
 
     p.logsumexp_ptr = nullptr;  // [num_heads, num_queries] for backward or nullptr for forward
     p.output_ptr = reinterpret_cast<T*>(params.output);
@@ -172,13 +171,21 @@ void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
     p.head_dim_value = params.v_head_size;
 
     p.scale = params.scale;
+    p.softcap = params.softcap;
 
     // When params.cu_seqlens_q is provided, num_queries is max_seq_q and num_keys will be set inside the kernel
     p.num_queries = params.sequence_length;
     p.num_keys = params.kv_sequence_length;
 
     if (params.causal) {
-      p.custom_mask_type = Attention::CausalFromBottomRight;
+      // ONNX spec: is_causal means upper-left alignment (q_i attends to kv[0..i]).
+      // When past_sequence_length > 0 (decode with KV cache), positions shift → lower-right.
+      // causal_from_top_left=true: past_seq==0, use CausalFromTopLeft (offset=0).
+      // causal_from_top_left=false: past_seq>0 or S_q==S_kv, use CausalFromBottomRight
+      //   (offset = num_keys - num_queries, which is 0 when square).
+      p.custom_mask_type = static_cast<uint8_t>(params.causal_from_top_left
+                                                    ? Attention::CausalFromTopLeft
+                                                    : Attention::CausalFromBottomRight);
     }
 
     // We use max_sequence_length to calculate KV stride
@@ -187,70 +194,131 @@ void LaunchCutlassFmha(const MemoryEfficientAttentionParams& params) {
       p.q_strideH = params.qk_head_size;
       p.k_strideH = params.qk_head_size;
       p.v_strideH = params.v_head_size;
-      p.bias_strideH = nullptr == params.attn_bias ? 0 : p.num_queries * p.num_keys;
 
       p.q_strideM = params.num_heads * params.qk_head_size;
       p.k_strideM = params.num_heads * params.qk_head_size;
       p.v_strideM = params.num_heads * params.v_head_size;
       p.o_strideM = params.num_heads * params.v_head_size;
-      p.bias_strideM = nullptr == params.attn_bias ? 0 : p.num_keys;
 
       p.q_strideB = static_cast<int64_t>(p.q_strideM) * params.sequence_length;
       p.k_strideB = static_cast<int64_t>(p.k_strideM) * params.max_sequence_length;
       p.v_strideB = static_cast<int64_t>(p.v_strideM) * params.max_sequence_length;
-      p.bias_strideB = params.is_attn_bias_batched ? static_cast<int64_t>(p.bias_strideH) * params.num_heads : 0;
     } else {
       // Input K, V format is BxNxSxH, Input Q is BxSxNxH, output is BxSxNxH
       p.q_strideH = params.qk_head_size;
       p.k_strideH = params.max_sequence_length * params.qk_head_size;
       p.v_strideH = params.max_sequence_length * params.v_head_size;
-      p.bias_strideH = nullptr == params.attn_bias ? 0 : p.num_queries * p.num_keys;
 
       p.q_strideM = params.num_heads * params.qk_head_size;
       p.k_strideM = params.qk_head_size;
       p.v_strideM = params.v_head_size;
       p.o_strideM = params.num_heads * params.v_head_size;
-      p.bias_strideM = nullptr == params.attn_bias ? 0 : p.num_keys;
 
       p.q_strideB = params.num_heads * params.qk_head_size * params.sequence_length;
       p.k_strideB = params.num_heads * params.qk_head_size * params.max_sequence_length;
       p.v_strideB = params.num_heads * params.v_head_size * params.max_sequence_length;
-      p.bias_strideB = params.is_attn_bias_batched ? static_cast<int64_t>(p.bias_strideH) * params.num_heads : 0;
     }
-  }
 
-  auto kernel_fn = attention_kernel_batched_impl<Attention>;
-  if (params.has_custom_right_padding) {
-    kernel_fn = attention_kernel_batched_impl_right_padding<Attention, queries_per_block>;
+    if (params.attn_bias != nullptr) {
+      p.bias_strideH = params.broadcast_attn_bias_dim_1
+                           ? 0
+                           : static_cast<int64_t>(p.num_queries) * p.num_keys;
+      p.bias_strideM = p.num_keys;
+      p.bias_strideB = params.broadcast_attn_bias_dim_0
+                           ? 0
+                           : static_cast<int64_t>(
+                                 params.broadcast_attn_bias_dim_1 ? 1 : params.num_heads) *
+                                 p.num_queries * p.num_keys;
+    } else {
+      p.bias_strideH = 0;
+      p.bias_strideM = 0;
+      p.bias_strideB = 0;
+    }
+
+    p.use_smooth_softmax = params.use_smooth_softmax;
+    p.window_size = params.local_window_size;
   }
 
   int smem_bytes = sizeof(typename Attention::SharedStorage);
   if (smem_bytes > 0xc000) {
     ORT_ENFORCE(params.sm >= 70, "This kernel requires too much shared memory on this machine!");
-    static bool once = [&]() {
-      cudaFuncSetAttribute(kernel_fn, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
-      return true;
-    }();
+    if (params.has_custom_right_padding) {
+      static bool right_padding_once = [&]() {
+        CUDA_CALL_THROW(cudaFuncSetAttribute(
+            attention_kernel_batched_impl_right_padding<Attention, queries_per_block>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        return true;
+      }();
+      ORT_UNUSED_PARAMETER(right_padding_once);
+    } else {
+      static bool default_once = [&]() {
+        CUDA_CALL_THROW(cudaFuncSetAttribute(
+            attention_kernel_batched_impl<Attention>,
+            cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes));
+        return true;
+      }();
+      ORT_UNUSED_PARAMETER(default_once);
+    }
   }
 
   ORT_ENFORCE(Attention::check_supported(p));
-  kernel_fn<<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes, params.stream>>>(p);
+  if (params.has_custom_right_padding) {
+    attention_kernel_batched_impl_right_padding<Attention, queries_per_block>
+        <<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes, params.stream>>>(p);
+  } else {
+    attention_kernel_batched_impl<Attention>
+        <<<p.getBlocksGrid(), p.getThreadsGrid(), smem_bytes, params.stream>>>(p);
+  }
 }
 
-template <typename T, typename ArchTag, int queries_per_block, int keys_per_block, bool single_value_iteration>
+template <typename T, typename ArchTag, int queries_per_block, int keys_per_block, int max_head_size>
 void DispatchIsAligned(const MemoryEfficientAttentionParams& params) {
-  using AlignedAK = AttentionKernel<T, ArchTag, true, queries_per_block, keys_per_block, single_value_iteration>;
+  using AlignedAK = AttentionKernel<T, ArchTag, true, queries_per_block, keys_per_block, max_head_size>;
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(push)
 #pragma warning(disable : 6287 4189)  // kAligned is used via capture so 4189 warning seems incorrect
 #endif
+
   // Run a more efficient kernel with `isAligned=True` when memory is correctly aligned.
   bool is_aligned = params.qk_head_size % AlignedAK::kAlignmentQ == 0 &&
                     params.qk_head_size % AlignedAK::kAlignmentK == 0 &&
                     params.v_head_size % AlignedAK::kAlignmentV == 0;
+
+  // Bias stride alignment check: route to the unaligned kernel when bias strides
+  // don't satisfy the aligned kernel's kAlignmentQ requirement.
+  //
+  // kAlignmentQ is template-dependent (kernel_forward.h:414):
+  //   isAligned=true:  kAlignmentQ = DefaultConfig::kAlignmentA (8 for fp16/bf16 SM75+)
+  //   isAligned=false: kAlignmentQ = GemmType::kMinimumAlignment (4 for fp16/bf16 SM75+)
+  // So check_supported (line 632) enforces DIFFERENT thresholds per path.
+  //
+  // The ONNX Attention kernel (core/providers/cuda/llm/attention.cc) gates MEA eligibility
+  // at kMinimumAlignment (4), allowing strides like 12 that the unaligned kernel handles.
+  // Without this check, such inputs dispatch to the aligned kernel where 12%8≠0 crashes.
+  // Contrib MHA gates at 4*sizeof(T)=8 for fp16, making this check redundant there.
+  if (params.attn_bias != nullptr) {
+    int num_keys = params.kv_sequence_length;
+    int num_queries = params.sequence_length;
+    int bias_strideM = num_keys;
+    // Broadcast dimensions use stride=0, which satisfies any alignment (0 % N == 0).
+    int64_t bias_strideH = params.broadcast_attn_bias_dim_1
+                               ? 0
+                               : static_cast<int64_t>(num_queries) * num_keys;
+    int64_t bias_strideB = params.broadcast_attn_bias_dim_0
+                               ? 0
+                               : static_cast<int64_t>(
+                                     params.broadcast_attn_bias_dim_1 ? 1 : params.num_heads) *
+                                     num_queries * num_keys;
+    is_aligned = is_aligned &&
+                 bias_strideM % AlignedAK::kAlignmentQ == 0 &&
+                 (params.num_heads <= 1 || bias_strideH % AlignedAK::kAlignmentQ == 0) &&
+                 (params.batch_size <= 1 || bias_strideB % AlignedAK::kAlignmentQ == 0);
+  }
+
   DISPATCH_BOOL(is_aligned, kIsAligned, ([&]() {
-                  LaunchCutlassFmha<T, ArchTag, kIsAligned, queries_per_block, keys_per_block, single_value_iteration>(params);
+                  LaunchCutlassFmha<T, ArchTag, kIsAligned::value, queries_per_block, keys_per_block, max_head_size>(params);
                 }));
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(pop)
 #endif
@@ -259,11 +327,11 @@ void DispatchIsAligned(const MemoryEfficientAttentionParams& params) {
 template <typename T, typename ArchTag>
 void DispatchBlockSize(const MemoryEfficientAttentionParams& params) {
   if (params.v_head_size <= 64) {
-    DispatchIsAligned<T, ArchTag, 64, 64, true>(params);
+    DispatchIsAligned<T, ArchTag, 64, 64, 64>(params);
   } else if (params.v_head_size <= 128) {
-    DispatchIsAligned<T, ArchTag, 32, 128, true>(params);
+    DispatchIsAligned<T, ArchTag, 32, 128, 128>(params);
   } else {
-    DispatchIsAligned<T, ArchTag, 32, 128, false>(params);
+    DispatchIsAligned<T, ArchTag, 32, 128, kEfficientAttentionMaxHeadSize>(params);
   }
 }
 

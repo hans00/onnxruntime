@@ -1,6 +1,5 @@
 import argparse
 import os
-from typing import Optional
 
 import cv2
 import open_clip
@@ -14,11 +13,12 @@ def arg_parser():
     parser.add_argument("--image1", type=str, help="Path to image 1")
     parser.add_argument("--image2", type=str, help="Path to image 2")
     parser.add_argument("--cache_dir", type=str, help="Path to model cache directory")
+    parser.add_argument("--negative", action="store_true", help="match the unexpected image, for testing purpose")
     args = parser.parse_args()
     return args
 
 
-def image_encoder(img: Image.Image, cache_dir: Optional[str] = None):  # -> torch.Tensor:
+def image_encoder(img: Image.Image, cache_dir: str | None = None):  # -> torch.Tensor:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, _, preprocess = open_clip.create_model_and_transforms(
         "ViT-B-16-plus-240", pretrained="laion400m_e32", cache_dir=cache_dir
@@ -45,7 +45,7 @@ def load_image(image_path: str):  # -> Image.Image:
     return img
 
 
-def generate_score(image1: str, image2: str, cache_dir: Optional[str] = None):  # -> float:
+def generate_score(image1: str, image2: str, cache_dir: str | None = None):  # -> float:
     test_img = load_image(image1)
     data_img = load_image(image2)
     img1 = image_encoder(test_img, cache_dir)
@@ -62,11 +62,16 @@ def main():
     cache_dir = args.cache_dir
     score = round(generate_score(image1, image2, cache_dir), 2)
     print("similarity Score: ", {score})
-    if score < 97:
-        print(f"{image1} and {image2} are different")
-        raise SystemExit(1)
+    if args.negative:
+        if score > 95:
+            print("Why generated this incorrect image")
+            raise SystemExit(1)
     else:
-        print(f"{image1} and {image2} are same")
+        if score < 95:
+            print(f"{image1} and {image2} are different")
+            raise SystemExit(1)
+        else:
+            print(f"{image1} and {image2} are same")
 
 
 if __name__ == "__main__":

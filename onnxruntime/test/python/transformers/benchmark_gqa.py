@@ -4,336 +4,327 @@
 # --------------------------------------------------------------------------
 
 """
-Benchmark performance of MultiHeadAttention with Nvidia GPU of Compute Capability 8.0, 8.6 or 8.9 in Linux:
-sh benchmark_mha.sh
+Benchmark performance of GroupQueryAttention.
 """
 
-import math
-import random
-import statistics
-import time
+from dataclasses import dataclass
 
 import torch
-from onnx import TensorProto, helper
+from gqa_test_helper import GroupQueryAttentionConfig, OrtGroupQueryAttention
 
-from onnxruntime import InferenceSession, OrtValue, SessionOptions
-
-
-class InputFormats:
-    QKV_BSNH = 0
-    QKV_BNSH = 1
+try:
+    import triton
+except ImportError:
+    triton = None
 
 
-class Config:
-    batch_size = 0
-    sequence_length = 0
-    kv_sequence_length = 0
-    past_sequence_length = 0
-    num_heads = 0
-    kv_num_heads = 0
-    head_size = 0
-
-    def __init__(self, b, s, s2, sp, n, n2, h):
-        self.batch_size = b
-        self.sequence_length = s
-        self.kv_sequence_length = s2
-        self.past_sequence_length = sp
-        self.num_heads = n
-        self.kv_num_heads = n2
-        self.head_size = h
+@dataclass
+class TestConfig:
+    test_int4: bool = False
+    test_int8: bool = False
+    test_fp8: bool = False
 
 
-def create_group_query_attention_graph_past(
-    config, causal=False, past_kv_format=InputFormats.QKV_BSNH, share_buffer=True
-):
-    past_kv_seqlen = config.kv_sequence_length if share_buffer else config.past_sequence_length
-    present_kv_seqlen = (
-        config.kv_sequence_length if share_buffer else config.past_sequence_length + config.sequence_length
-    )
-    nodes = [
-        helper.make_node(
-            "GroupQueryAttention",
-            [
-                "query",
-                "key",
-                "value",
-                "past_key",
-                "past_value",
-                "past_sequence_length" if share_buffer else "",
-            ],
-            ["output", "present_key", "present_value"],
-            "GroupQueryAttention_0",
-            num_heads=config.num_heads,
-            kv_num_heads=config.kv_num_heads,
-            unidirectional=1 if causal else 0,
-            is_past_bsnh=1 if past_kv_format == InputFormats.QKV_BSNH else 0,
-            domain="com.microsoft",
-        ),
-    ]
-
-    graph_input = [
-        helper.make_tensor_value_info(
-            "query",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                config.sequence_length,
-                config.num_heads * config.head_size,
-            ],
-        ),
-        helper.make_tensor_value_info(
-            "key",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                config.sequence_length,
-                config.kv_num_heads * config.head_size,
-            ],
-        ),
-        helper.make_tensor_value_info(
-            "value",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                config.sequence_length,
-                config.kv_num_heads * config.head_size,
-            ],
-        ),
-        helper.make_tensor_value_info(
-            "past_key",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                past_kv_seqlen if past_kv_format == InputFormats.QKV_BSNH else config.kv_num_heads,
-                config.kv_num_heads if past_kv_format == InputFormats.QKV_BSNH else past_kv_seqlen,
-                config.head_size,
-            ],
-        ),
-        helper.make_tensor_value_info(
-            "past_value",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                past_kv_seqlen if past_kv_format == InputFormats.QKV_BSNH else config.kv_num_heads,
-                config.kv_num_heads if past_kv_format == InputFormats.QKV_BSNH else past_kv_seqlen,
-                config.head_size,
-            ],
-        ),
-    ]
-    if share_buffer:
-        graph_input += [
-            helper.make_tensor_value_info(
-                "past_sequence_length",
-                TensorProto.INT32,
-                [1],
-            )
-        ]
-
-    graph_output = [
-        helper.make_tensor_value_info(
-            "output",
-            TensorProto.FLOAT16,
-            [config.batch_size, config.sequence_length, config.num_heads * config.head_size],
-        ),
-        helper.make_tensor_value_info(
-            "present_key",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                present_kv_seqlen if past_kv_format == InputFormats.QKV_BSNH else config.kv_num_heads,
-                config.kv_num_heads if past_kv_format == InputFormats.QKV_BSNH else present_kv_seqlen,
-                config.head_size,
-            ],
-        ),
-        helper.make_tensor_value_info(
-            "present_value",
-            TensorProto.FLOAT16,
-            [
-                config.batch_size,
-                present_kv_seqlen if past_kv_format == InputFormats.QKV_BSNH else config.kv_num_heads,
-                config.kv_num_heads if past_kv_format == InputFormats.QKV_BSNH else present_kv_seqlen,
-                config.head_size,
-            ],
-        ),
-    ]
-
-    graph = helper.make_graph(
-        nodes,
-        "GroupQueryAttention_Graph",
-        graph_input,
-        graph_output,
-    )
-
-    model = helper.make_model(graph)
-    return model.SerializeToString()
-
-
-def create_gqa_session(
-    config: Config,
-    causal: bool = False,
-    past_format=InputFormats.QKV_BSNH,
-    share_buffer: bool = True,
-) -> InferenceSession:
-    onnx_model_str = create_group_query_attention_graph_past(config, causal, past_format, share_buffer)
-    sess_options = SessionOptions()
-    ort_session = InferenceSession(onnx_model_str, sess_options, providers=["CUDAExecutionProvider"])
-    return ort_session
-
-
-def bind_io(io_binding, input_dict, device, share_buffer=True):
-    io_binding.bind_cpu_input("query", input_dict["query"])
-    io_binding.bind_cpu_input("key", input_dict["key"])
-    io_binding.bind_cpu_input("value", input_dict["value"])
-    io_binding.bind_input(
-        "past_key", "cuda", 0, "float16", input_dict["past_key"].shape(), input_dict["past_key"].data_ptr()
-    )
-    io_binding.bind_input(
-        "past_value",
-        "cuda",
-        0,
-        "float16",
-        input_dict["past_value"].shape(),
-        input_dict["past_value"].data_ptr(),
-    )
-    io_binding.bind_output("output")
-    if share_buffer:
-        io_binding.bind_cpu_input("past_sequence_length", input_dict["past_sequence_length"])
-        io_binding.bind_output(
-            "present_key",
-            device_type="cuda",
-            device_id=device,
-            element_type="float16",
-            shape=input_dict["past_key"].shape(),
-            buffer_ptr=input_dict["past_key"].data_ptr(),
-        )
-        io_binding.bind_output(
-            "present_value",
-            device_type="cuda",
-            device_id=device,
-            element_type="float16",
-            shape=input_dict["past_value"].shape(),
-            buffer_ptr=input_dict["past_value"].data_ptr(),
-        )
+def get_plot_algos(sm: int, local_window_size: int | None, config: TestConfig | None):
+    # GQA with local windows only works in sm=8x
+    if sm >= 80 and local_window_size:
+        line_vals = ["ort_gqa", "ort_gqa_local", "ort_gqa_packed", "ort_gqa_local_packed"]
+        line_names = ["ORT-GQA-Dense", "ORT-GQA-Local", "ORT-GQA-Dense-PackedQKV", "ORT-GQA-Local-PackedQKV"]
+        styles = [("red", "solid"), ("yellow", "dashdot"), ("blue", "dashed"), ("green", "dotted")]
     else:
-        io_binding.bind_output("present_key")
-        io_binding.bind_output("present_value")
+        line_vals = ["ort_gqa", "ort_gqa_packed"]
+        line_names = ["ORT-GQA-Dense", "ORT-GQA-Dense-PackedQKV"]
+        styles = [("red", "solid"), ("blue", "dashed")]
+
+    # Add quantized variants if requested
+    if sm >= 80 and config:
+        quant_vals = ["ort_gqa_int4", "ort_gqa_int8", "ort_gqa_fp8"]
+        quant_names = ["ORT-GQA-INT4", "ORT-GQA-INT8", "ORT-GQA-FP8"]
+        quant_styles = [("purple", "dotted"), ("orange", "dashdot"), ("brown", "dashed")]
+        if config.test_int4:
+            line_vals.append(quant_vals[0])
+            line_names.append(quant_names[0])
+            styles.append(quant_styles[0])
+        if config.test_int8:
+            line_vals.append(quant_vals[1])
+            line_names.append(quant_names[1])
+            styles.append(quant_styles[1])
+        if config.test_fp8:
+            line_vals.append(quant_vals[2])
+            line_names.append(quant_names[2])
+            styles.append(quant_styles[2])
+
+    return {
+        "line_vals": line_vals,
+        "line_names": line_names,
+        "styles": styles,
+    }
 
 
-def measure_latency(ort_session, io_binding):
-    start = time.time()
-    _ = ort_session.run_with_iobinding(io_binding)
-    end = time.time()
-    return end - start
+def plot_prompt_performance(
+    sm: int,
+    model_name: str,
+    batch_size: int,
+    num_heads: int,
+    kv_num_heads: int,
+    head_size: int,
+    max_seq_len: int,
+    local_window_size: int | None = None,
+    use_smooth_softmax: bool = False,
+    config: TestConfig | None = None,
+    dtype: str = "float16",
+):
+    algos = get_plot_algos(sm, local_window_size, config)
+    configs = [
+        triton.testing.Benchmark(
+            x_names=["sequence_length"],
+            x_vals=[2**i for i in range(6, 17) if 2**i <= max_seq_len],
+            line_arg="provider",
+            ylabel="ms",
+            **algos,
+            plot_name=f"prompt-sm{sm}-{model_name}-b{batch_size}-h{num_heads}_{kv_num_heads}x{head_size}-{dtype}",
+            args={
+                "batch_size": batch_size,
+                "num_heads": num_heads,
+                "kv_num_heads": kv_num_heads,
+                "head_size": head_size,
+                "local_window_size": local_window_size,
+                "use_smooth_softmax": use_smooth_softmax,
+                "dtype": dtype,
+            },
+        )
+    ]
+
+    @triton.testing.perf_report(configs)
+    def benchmark(
+        provider: str,
+        sequence_length: int,
+        batch_size: int,
+        num_heads: int,
+        kv_num_heads: int,
+        head_size: int,
+        local_window_size: int | None = None,
+        use_smooth_softmax: bool = False,
+        dtype: str = "float16",
+        device="cuda",
+    ):
+        warmup = 15
+        repeat = 100
+
+        # Determine quantization settings based on provider
+        k_quant_type = "NONE"
+        v_quant_type = "NONE"
+        kv_cache_type = "float16" if dtype == "float16" else "bfloat16"
+        if "_int4" in provider:
+            k_quant_type = v_quant_type = "PER_CHANNEL"
+            kv_cache_type = "int4"
+        elif "_int8" in provider:
+            k_quant_type = v_quant_type = "PER_TENSOR"
+            kv_cache_type = "int8"
+        elif "_fp8" in provider:
+            k_quant_type = v_quant_type = "PER_TENSOR"
+            kv_cache_type = "fp8"
+
+        config: GroupQueryAttentionConfig = GroupQueryAttentionConfig(
+            batch_size=batch_size,
+            sequence_length=sequence_length,
+            max_sequence_length=max_seq_len,
+            past_sequence_length=0,
+            num_heads=num_heads,
+            kv_num_heads=kv_num_heads,
+            head_size=head_size,
+            local_window_size=local_window_size if provider in ["ort_gqa_local", "ort_gqa_local_packed"] else -1,
+            use_smooth_softmax=use_smooth_softmax,
+            device=device,
+            dtype=torch.float16 if dtype == "float16" else torch.bfloat16,
+            is_packed_qkv=provider in ["ort_gqa_packed", "ort_gqa_local_packed"],
+            k_quant_type=k_quant_type,
+            v_quant_type=v_quant_type,
+            kv_cache_type=kv_cache_type,
+        )
+
+        obj = OrtGroupQueryAttention(config)
+
+        ms = triton.testing.do_bench(obj.infer, warmup=warmup, rep=repeat)
+        return ms
+
+    benchmark.run(save_path=".", print_data=True)
 
 
-def flops(batch, q_seqlen, kv_seqlen, head_size, num_heads):
-    return 4 * batch * q_seqlen * kv_seqlen * num_heads * head_size
+def plot_token_performance(
+    sm: int,
+    model_name: str,
+    batch_size: int,
+    num_heads: int,
+    kv_num_heads: int,
+    head_size: int,
+    max_seq_len: int,
+    local_window_size: int | None = None,
+    use_smooth_softmax: bool = False,
+    config: TestConfig | None = None,
+    dtype: str = "float16",
+):
+    algos = get_plot_algos(sm, local_window_size, config)
+    configs = [
+        triton.testing.Benchmark(
+            x_names=["past_sequence_length"],
+            x_vals=[2**i for i in range(6, 17) if 2**i < max_seq_len] + [max_seq_len - 1],
+            line_arg="provider",
+            ylabel="ms",
+            **algos,
+            plot_name=f"token-sm{sm}-{model_name}-b{batch_size}-h{num_heads}_{kv_num_heads}_d{head_size}-{dtype}",
+            args={
+                "batch_size": batch_size,
+                "num_heads": num_heads,
+                "kv_num_heads": kv_num_heads,
+                "head_size": head_size,
+                "local_window_size": local_window_size,
+                "use_smooth_softmax": use_smooth_softmax,
+                "dtype": dtype,
+            },
+        )
+    ]
+
+    @triton.testing.perf_report(configs)
+    def benchmark(
+        provider: str,
+        past_sequence_length: int,
+        batch_size: int,
+        num_heads: int,
+        kv_num_heads: int,
+        head_size: int,
+        local_window_size: int | None = None,
+        use_smooth_softmax: bool = False,
+        dtype: str = "float16",
+        device="cuda",
+    ):
+        warmup = 15
+        repeat = 100
+
+        # Determine quantization settings based on provider
+        k_quant_type = "NONE"
+        v_quant_type = "NONE"
+        kv_cache_type = "float16" if dtype == "float16" else "bfloat16"
+        share_kv_scale = False
+        if "_int4" in provider:
+            k_quant_type = v_quant_type = "PER_CHANNEL"
+            kv_cache_type = "int4"
+        elif "_int8" in provider:
+            k_quant_type = v_quant_type = "PER_TENSOR"
+            kv_cache_type = "int8"
+            share_kv_scale = True  # XQA requires shared scale
+        elif "_fp8" in provider:
+            k_quant_type = v_quant_type = "PER_TENSOR"
+            kv_cache_type = "fp8"
+            share_kv_scale = True  # XQA requires shared scale
+
+        config: GroupQueryAttentionConfig = GroupQueryAttentionConfig(
+            batch_size=batch_size,
+            sequence_length=1,
+            max_sequence_length=max_seq_len,
+            past_sequence_length=past_sequence_length,
+            num_heads=num_heads,
+            kv_num_heads=kv_num_heads,
+            head_size=head_size,
+            local_window_size=local_window_size if provider in ["ort_gqa_local", "ort_gqa_local_packed"] else -1,
+            do_rotary=True,  # Most models use rotary positional embeddings
+            is_packed_qkv=provider in ["ort_gqa_packed", "ort_gqa_local_packed"],
+            use_smooth_softmax=use_smooth_softmax,
+            device=device,
+            dtype=torch.float16 if dtype == "float16" else torch.bfloat16,
+            k_quant_type=k_quant_type,
+            v_quant_type=v_quant_type,
+            kv_cache_type=kv_cache_type,
+            share_kv_scale=share_kv_scale,
+        )
+
+        obj = OrtGroupQueryAttention(config)
+
+        ms = triton.testing.do_bench(obj.infer, warmup=warmup, rep=repeat)
+        return ms
+
+    benchmark.run(save_path=".", print_data=True)
 
 
-def tflops_per_second(flop, time):
-    return (flop / time / 10**12) if not math.isnan(time) else 0.0
+def run_performance_test(
+    sm: int, fast: bool = False, config: TestConfig | None = None, dtype: str = "float16", is_prompt: bool = True
+):
+    """
+    Run performance tests for prompt and token generation.
 
-
-def benchmark_op(session, io_binding, repeats=100):
-    # warm up session
-    _ = measure_latency(session, io_binding)
-
-    latency_list = []
-    for _ in range(repeats):
-        latency = measure_latency(session, io_binding)
-        latency_list.append(latency)
-    return statistics.mean(latency_list)
-
-
-def run_tflops_test(dtype=torch.float16, repeats: int = 100):
+    """
     device_id = torch.cuda.current_device()
-    device = torch.device("cuda", device_id)
-    print("---- GQA BSNH vs GQA BNSH ----")
-    print("op\tbatch\ts_kv\theads\th_dim\tms\tTFLOPS")
-    mean_bsnh_lat = 0
-    mean_bnsh_lat = 0
-    num_trials = 0
-    share_buffer = True
-    random.seed(69)
-    for b in [1, 3, 8, 16]:
-        for s_q, s_kv in [(1, 128), (128, 256), (512, 512), (128, 1024), (1, 2048)]:
-            for n_q, n_kv in [(8, 8), (16, 8), (32, 32), (12, 3), (128, 64)]:
-                for h in [32, 64, 128]:
-                    sp = random.randint(1, s_kv - 1) if s_kv - 1 > 0 else 0
-                    config = Config(b, s_q, s_kv, sp, n_q, n_kv, h)
+    memory_in_gb = torch.cuda.get_device_properties(device_id).total_memory / (1024 * 1024 * 1024)
 
-                    bsnh_session = create_gqa_session(
-                        config,
-                        causal=False,
-                        past_format=InputFormats.QKV_BSNH,
-                        share_buffer=share_buffer,
+    # Note: some models use bf16.
+    # We use fp16/bf16 for all models in this test.
+    configures = [
+        (40, 128, 8, 8192, None, "Qwen3-14B"),
+        (32, 128, 8, 8192, None, "Llama3-8B"),
+        (64, 128, 8, 8192, None, "Llama3-70B"),
+        (32, 128, 8, 32768, 4096, "Mistral-7B-v0.1"),
+        (48, 128, 8, 65536, None, "Mixtral-8x22B-v0.1"),
+        (32, 96, 32, 131072, None, "Phi-3-mini-128k"),
+        (32, 128, 8, 131072, None, "Phi-3-small-128k"),  # Sparsity is not used in this test
+        (40, 128, 10, 131072, None, "Phi-3-medium-128K"),
+        # Gemma 4 global attention layers: num_attention_heads=8,
+        # num_key_value_heads=4, head_dim=512. Head_dim > 256 is unsupported by
+        # Flash / Memory-Efficient Attention, so this exercises the GQA unfused
+        # fallback kernel (issue #28195). Listed twice: global (dense) and local
+        # (sliding window) variants.
+        (8, 512, 4, 32768, None, "Gemma4-global-h512"),
+        (8, 512, 4, 32768, 4096, "Gemma4-local-h512"),
+    ]
+
+    if fast:
+        configures = configures[:1]
+    batch_sizes = [1] if fast else [1, 4]
+    smooth_softmax_options = [False] if fast else [False, True]
+
+    # Reduce max sequence length when GPU memory is not enough.
+    threshold = 131072 if memory_in_gb > 24 else 65536 if memory_in_gb > 12 else 32768
+
+    for num_heads, head_size, kv_num_heads, max_seq_len, local_window_size, model_name in configures:
+        for batch_size in batch_sizes:
+            for use_smooth_softmax in smooth_softmax_options:
+                if is_prompt:
+                    plot_prompt_performance(
+                        sm=sm,
+                        batch_size=batch_size,
+                        num_heads=num_heads,
+                        kv_num_heads=kv_num_heads,
+                        head_size=head_size,
+                        max_seq_len=min(threshold, max_seq_len),
+                        local_window_size=local_window_size,
+                        use_smooth_softmax=use_smooth_softmax,
+                        model_name=model_name,
+                        config=config,
+                        dtype=dtype,
                     )
-                    bnsh_session = create_gqa_session(
-                        config,
-                        causal=False,
-                        past_format=InputFormats.QKV_BNSH,
-                        share_buffer=share_buffer,
+                else:
+                    plot_token_performance(
+                        sm=sm,
+                        batch_size=batch_size,
+                        num_heads=num_heads,
+                        kv_num_heads=kv_num_heads,
+                        head_size=head_size,
+                        max_seq_len=min(threshold, max_seq_len),
+                        local_window_size=local_window_size,
+                        use_smooth_softmax=use_smooth_softmax,
+                        model_name=model_name,
+                        config=config,
+                        dtype=dtype,
                     )
-
-                    q = torch.randn(b, s_q, n_q * h, device=device, dtype=dtype)
-                    kv = torch.randn(b, s_q, 2, n_kv * h, device=device, dtype=dtype)
-                    k, v = kv.unbind(dim=2)
-
-                    past_kv = torch.rand(b, s_kv if share_buffer else sp, 2, n_kv, h, device=device, dtype=dtype)
-                    past_k, past_v = past_kv.unbind(dim=2)
-
-                    input_dict_bsnh = {
-                        "query": q.detach().cpu().numpy(),
-                        "key": k.detach().cpu().numpy(),
-                        "value": v.detach().cpu().numpy(),
-                        "past_key": OrtValue.ortvalue_from_numpy(past_k.detach().cpu().numpy(), "cuda", device_id),
-                        "past_value": OrtValue.ortvalue_from_numpy(past_v.detach().cpu().numpy(), "cuda", device_id),
-                    }
-                    input_dict_bnsh = {
-                        "query": q.detach().cpu().numpy(),
-                        "key": k.detach().cpu().numpy(),
-                        "value": v.detach().cpu().numpy(),
-                        "past_key": OrtValue.ortvalue_from_numpy(
-                            past_k.transpose(1, 2).detach().cpu().numpy(), "cuda", 0
-                        ),
-                        "past_value": OrtValue.ortvalue_from_numpy(
-                            past_v.transpose(1, 2).detach().cpu().numpy(), "cuda", 0
-                        ),
-                    }
-                    if share_buffer:
-                        input_dict_bsnh["past_sequence_length"] = (
-                            torch.tensor([sp], device="cuda", dtype=torch.int32).detach().cpu().numpy()
-                        )
-                        input_dict_bnsh["past_sequence_length"] = (
-                            torch.tensor([sp], device="cuda", dtype=torch.int32).detach().cpu().numpy()
-                        )
-
-                    io_binding_bsnh = bsnh_session.io_binding()
-                    io_binding_bnsh = bnsh_session.io_binding()
-                    bind_io(io_binding_bsnh, input_dict_bsnh, device_id, share_buffer)
-                    bind_io(io_binding_bnsh, input_dict_bnsh, device_id, share_buffer)
-                    average_gqa_bsnh_latency = benchmark_op(bsnh_session, io_binding_bsnh, repeats)
-                    average_gqa_bnsh_latency = benchmark_op(bnsh_session, io_binding_bnsh, repeats)
-
-                    del bsnh_session
-                    del bnsh_session
-
-                    # compute TFLOPS per second
-                    bsnh_speed = tflops_per_second(flops(b, s_q, s_kv, h, n_q), average_gqa_bsnh_latency)
-                    print(f"bsnh\t{b}\t{s_kv}\t{n_q}\t{h}\t{average_gqa_bsnh_latency * 1000:.2f}\t{bsnh_speed:.2f}")
-                    bnsh_speed = tflops_per_second(flops(b, s_q, s_kv, h, n_q), average_gqa_bnsh_latency)
-                    print(f"bnsh\t{b}\t{s_kv}\t{n_q}\t{h}\t{average_gqa_bnsh_latency * 1000:.2f}\t{bnsh_speed:.2f}")
-                    print("---------")
-                    if average_gqa_bsnh_latency > 10 * average_gqa_bnsh_latency:
-                        continue
-                    num_trials += 1
-                    mean_bsnh_lat += average_gqa_bsnh_latency
-                    mean_bnsh_lat += average_gqa_bnsh_latency
-    mean_bsnh_lat /= num_trials
-    mean_bnsh_lat /= num_trials
-    print(f"average bsnh latency:\t{mean_bsnh_lat}")
-    print(f"average bnsh latency:\t{mean_bnsh_lat}")
 
 
 if __name__ == "__main__":
-    run_tflops_test()
+    major, minor = torch.cuda.get_device_capability()
+    sm = major * 10 + minor
+
+    s = torch.cuda.Stream()
+    with torch.cuda.stream(s), torch.no_grad():
+        config = TestConfig(test_int4=False, test_int8=True, test_fp8=True)
+        run_performance_test(sm, fast=True, config=config, dtype="float16", is_prompt=True)
+        run_performance_test(sm, fast=True, config=config, dtype="float16", is_prompt=False)
+        # run_performance_test(sm, fast=True, config=config, dtype="bfloat16", is_prompt=True)
+        # run_performance_test(sm, fast=True, config=config, dtype="bfloat16", is_prompt=False)

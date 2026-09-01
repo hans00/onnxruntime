@@ -16,6 +16,10 @@ limitations under the License.
 
 #include "core/platform/env.h"
 
+#ifdef USE_POSIX_TELEMETRY
+#include "core/platform/posix/telemetry.h"
+#endif
+
 #include <assert.h>
 #include <dlfcn.h>
 #include <fcntl.h>
@@ -26,9 +30,12 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#if !defined(_AIX)
 #include <sys/syscall.h>
+#endif
 #include <unistd.h>
 
+#include <filesystem>
 #include <iostream>
 #include <optional>
 #include <thread>
@@ -43,10 +50,15 @@ limitations under the License.
 #define ORT_USE_CPUINFO
 #endif
 
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)
+#include <sys/sysctl.h>
+#endif
+
 #include "core/common/common.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/common/logging/logging.h"
 #include "core/common/narrow.h"
+#include "core/common/safeint.h"
 #include "core/platform/scoped_resource.h"
 #include "core/platform/EigenNonBlockingThreadPool.h"
 
@@ -56,45 +68,10 @@ namespace {
 
 constexpr int OneMillion = 1000000;
 
-class UnmapFileParam {
- public:
-  void* addr;
-  size_t len;
-};
-
-/**
- * @brief Get System Error
- *
- * @return a pair of {errno, error message}
- */
-static std::pair<int, std::string> GetSystemError(int e) {
-  char buf[1024];
-  const char* msg = "";
-  if (e > 0) {
-#if defined(__GLIBC__) && defined(_GNU_SOURCE) && !defined(__ANDROID__)
-    msg = strerror_r(e, buf, sizeof(buf));
-#else
-    // for Mac OS X and Android lower than API 23
-    if (strerror_r(e, buf, sizeof(buf)) != 0) {
-      buf[0] = '\0';
-    }
-    msg = buf;
-#endif
-  }
-
-  return std::make_pair(e, msg);
-}
-
-static std::pair<int, std::string> GetSystemError() {
-  auto e = errno;
-  return GetSystemError(e);
-}
-
-static void UnmapFile(void* param) noexcept {
-  std::unique_ptr<UnmapFileParam> p(reinterpret_cast<UnmapFileParam*>(param));
-  int ret = munmap(p->addr, p->len);
+static void UnmapFile(void* addr, size_t len) noexcept {
+  int ret = munmap(addr, len);
   if (ret != 0) {
-    auto [err_no, err_msg] = GetSystemError();
+    auto [err_no, err_msg] = GetErrnoInfo();
     LOGS_DEFAULT(ERROR) << "munmap failed. error code: " << err_no << " error msg: " << err_msg;
   }
 }
@@ -104,8 +81,9 @@ struct FileDescriptorTraits {
   static Handle GetInvalidHandleValue() { return -1; }
   static void CleanUp(Handle h) {
     if (close(h) == -1) {
-      auto [err_no, err_msg] = GetSystemError();
-      LOGS_DEFAULT(ERROR) << "Failed to close file descriptor " << h << " - error code: " << err_no << " error msg: " << err_msg;
+      auto [err_no, err_msg] = GetErrnoInfo();
+      LOGS_DEFAULT(ERROR) << "Failed to close file descriptor " << h << " - error code: " << err_no
+                          << " error msg: " << err_msg;
     }
   }
 };
@@ -131,7 +109,7 @@ int nftw_remove(
     int /*typeflag*/, struct FTW* /*ftwbuf*/) {
   const auto result = remove(fpath);
   if (result != 0) {
-    auto [err_no, err_msg] = GetSystemError();
+    auto [err_no, err_msg] = GetErrnoInfo();
     LOGS_DEFAULT(WARNING) << "remove() failed. Error code: " << err_no << " error msg: " << err_msg
                           << ", path: " << fpath;
   }
@@ -188,7 +166,7 @@ class PosixThread : public EnvThread {
       pthread_attr_t attr;
       int s = pthread_attr_init(&attr);
       if (s != 0) {
-        auto [err_no, err_msg] = GetSystemError();
+        auto [err_no, err_msg] = GetErrnoInfo();
         ORT_THROW("pthread_attr_init failed, error code: ", err_no, " error msg: ", err_msg);
       }
 
@@ -196,14 +174,14 @@ class PosixThread : public EnvThread {
       if (stack_size > 0) {
         s = pthread_attr_setstacksize(&attr, stack_size);
         if (s != 0) {
-          auto [err_no, err_msg] = GetSystemError();
+          auto [err_no, err_msg] = GetErrnoInfo();
           ORT_THROW("pthread_attr_setstacksize failed, error code: ", err_no, " error msg: ", err_msg);
         }
       }
 
       s = pthread_create(&hThread, &attr, ThreadMain, param_ptr.get());
       if (s != 0) {
-        auto [err_no, err_msg] = GetSystemError();
+        auto [err_no, err_msg] = GetErrnoInfo();
         ORT_THROW("pthread_create failed, error code: ", err_no, " error msg: ", err_msg);
       }
       param_ptr.release();
@@ -249,14 +227,13 @@ class PosixThread : public EnvThread {
                                 << ", index: " << p->index
                                 << ", mask: " << *p->affinity;
         } else {
-          auto [err_no, err_msg] = GetSystemError(ret);
-#if !defined(USE_MIGRAPHX)
+          errno = ret;
+          auto [err_no, err_msg] = GetErrnoInfo();
           LOGS_DEFAULT(ERROR) << "pthread_setaffinity_np failed for thread: " << syscall(SYS_gettid)
                               << ", index: " << p->index
                               << ", mask: " << *p->affinity
                               << ", error code: " << err_no << " error msg: " << err_msg
                               << ". Specify the number of threads explicitly so the affinity is not set.";
-#endif
         }
       }
 #endif
@@ -304,7 +281,7 @@ class PosixEnv : public Env {
 
   std::vector<LogicalProcessors> GetDefaultThreadAffinities() const override {
     std::vector<LogicalProcessors> ret;
-#ifdef ORT_USE_CPUINFO
+#if defined(ORT_USE_CPUINFO) && defined(__linux__)
     if (cpuinfo_available_) {
       auto num_phys_cores = cpuinfo_get_cores_count();
       ret.reserve(num_phys_cores);
@@ -320,12 +297,47 @@ class PosixEnv : public Env {
         ret.push_back(std::move(th_aff));
       }
     }
-#endif
+#endif  // defined(ORT_USE_CPUINFO) && defined(__linux__)
     // Just the size of the thread-pool
     if (ret.empty()) {
       ret.resize(GetNumPhysicalCpuCores());
     }
     return ret;
+  }
+
+  int GetL2CacheSize() const override {
+#ifdef _SC_LEVEL2_CACHE_SIZE
+    // Prefer sysconf where it is implemented (e.g. Linux/x86), so those
+    // platforms keep their existing, working values. glibc's aarch64 backend
+    // does not implement the cache-size queries, so sysconf(_SC_LEVEL2_CACHE_SIZE)
+    // returns 0 on Linux/aarch64, which silently disables cache-tiled kernels
+    // (e.g. CPU FlashAttention in MultiHeadAttention). Only when sysconf reports
+    // no L2 do we fall back to cpuinfo, which reads the sizes from sysfs
+    // cacheinfo and works across architectures.
+    const auto l2_cache_size = sysconf(_SC_LEVEL2_CACHE_SIZE);
+    if (l2_cache_size > 0) {
+      return narrow<int>(l2_cache_size);
+    }
+#ifdef ORT_USE_CPUINFO
+    if (cpuinfo_available_ && cpuinfo_get_l2_caches_count() > 0) {
+      const auto* l2_cache = cpuinfo_get_l2_cache(0);
+      if (l2_cache != nullptr && l2_cache->size > 0) {
+        return narrow<int>(l2_cache->size);
+      }
+    }
+#endif  // ORT_USE_CPUINFO
+    return narrow<int>(l2_cache_size);
+#else
+    int value = 0;  // unknown
+#if (defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)) && defined(HW_L2CACHESIZE)
+    int mib[2] = {CTL_HW, HW_L2CACHESIZE};
+    size_t len = sizeof(value);
+    if (sysctl(mib, 2, &value, &len, NULL, 0) < 0) {
+      return -1;  // error
+    }
+#endif
+    return value;
+#endif
   }
 
   void SleepForMicroseconds(int64_t micros) const override {
@@ -442,9 +454,21 @@ class PosixEnv : public Env {
       return Status::OK();
     }
 
+    // Validate that the file is large enough for the requested mapping.
+    struct stat file_stat;
+    if (fstat(file_descriptor.Get(), &file_stat) != 0) {
+      return ReportSystemError("fstat", file_path);
+    }
+    const size_t requested_end = SafeInt<size_t>(offset) + length;
+    ORT_RETURN_IF(static_cast<size_t>(file_stat.st_size) < requested_end,
+                  "File \"", file_path,
+                  "\" is too small for the requested mapping (file size: ",
+                  file_stat.st_size, " bytes, requested offset + length: ",
+                  requested_end, " bytes).");
+
     static const size_t page_size = narrow<size_t>(sysconf(_SC_PAGESIZE));
     const FileOffsetType offset_to_page = offset % static_cast<FileOffsetType>(page_size);
-    const size_t mapped_length = length + static_cast<size_t>(offset_to_page);
+    const size_t mapped_length = SafeInt<size_t>(length) + static_cast<size_t>(offset_to_page);
     const FileOffsetType mapped_offset = offset - offset_to_page;
     void* const mapped_base =
         mmap(nullptr, mapped_length, PROT_READ | PROT_WRITE, MAP_PRIVATE, file_descriptor.Get(), mapped_offset);
@@ -455,13 +479,15 @@ class PosixEnv : public Env {
 
     mapped_memory =
         MappedMemoryPtr{reinterpret_cast<char*>(mapped_base) + offset_to_page,
-                        OrtCallbackInvoker{OrtCallback{UnmapFile, new UnmapFileParam{mapped_base, mapped_length}}}};
+                        [mapped_base, mapped_length](void*) {
+                          UnmapFile(mapped_base, mapped_length);
+                        }};
 
     return Status::OK();
   }
 
   static common::Status ReportSystemError(const char* operation_name, const std::string& path) {
-    auto [err_no, err_msg] = GetSystemError();
+    auto [err_no, err_msg] = GetErrnoInfo();
     std::ostringstream oss;
     oss << operation_name << " file \"" << path << "\" failed: " << err_msg;
     return common::Status(common::SYSTEM, err_no, oss.str());
@@ -473,6 +499,14 @@ class PosixEnv : public Env {
       return false;
     }
     return S_ISDIR(sb.st_mode);
+  }
+
+  bool FileExists(const std::string& path) const override {
+    struct stat sb;
+    if (stat(path.c_str(), &sb)) {
+      return false;
+    }
+    return S_ISREG(sb.st_mode);
   }
 
   common::Status CreateFolder(const std::string& path) const override {
@@ -532,6 +566,19 @@ class PosixEnv : public Env {
     return Status::OK();
   }
 
+  common::Status GetWeaklyCanonicalPath(
+      const PathString& path,
+      PathString& canonical_path) const override {
+    std::error_code ec;
+    auto canonical = std::filesystem::weakly_canonical(std::filesystem::path{path}, ec);
+    if (ec) {
+      return common::Status(common::ONNXRUNTIME, common::FAIL,
+                            "Failed to get the weakly canonical path: " + path + " - " + ec.message());
+    }
+    canonical_path.assign(canonical.native());
+    return Status::OK();
+  }
+
   common::Status LoadDynamicLibrary(const PathString& library_filename, bool global_symbols, void** handle) const override {
     dlerror();  // clear any old error_str
     *handle = dlopen(library_filename.c_str(), RTLD_NOW | (global_symbols ? RTLD_GLOBAL : RTLD_LOCAL));
@@ -555,6 +602,25 @@ class PosixEnv : public Env {
                             "Failed to unload library with error: " + std::string(error_str));
     }
     return common::Status::OK();
+  }
+
+  PathString GetRuntimePath() const override {
+// In AIX, dladdr is not supported.
+#if !defined(_AIX)
+    // Use dladdr() to look up the file that contains an address from this binary.
+    const void* const address_from_this_binary = reinterpret_cast<const void*>(Env::Default);
+
+    if (Dl_info dl_info{};
+        dladdr(address_from_this_binary, &dl_info) != 0 && dl_info.dli_fname != nullptr) {
+      LOGS_DEFAULT(VERBOSE) << "Getting runtime path as parent directory of binary: " << dl_info.dli_fname;
+
+      auto runtime_path = std::filesystem::path{dl_info.dli_fname};
+      runtime_path = std::filesystem::absolute(runtime_path);
+      runtime_path.remove_filename();
+      return runtime_path;
+    }
+#endif
+    return PathString{};
   }
 
   common::Status GetSymbolFromLibrary(void* handle, const std::string& symbol_name, void** symbol) const override {
@@ -596,12 +662,31 @@ class PosixEnv : public Env {
   }
 
  private:
+#ifdef USE_POSIX_TELEMETRY
+  PosixTelemetry telemetry_provider_;
+#else
   Telemetry telemetry_provider_;
+#endif
 #ifdef ORT_USE_CPUINFO
   PosixEnv() {
     cpuinfo_available_ = cpuinfo_initialize();
     if (!cpuinfo_available_) {
-      LOGS_DEFAULT(INFO) << "cpuinfo_initialize failed";
+      // PosixEnv may be constructed before the logging system is initialized
+      // (e.g. via a static Env::Default() reference in the Python bindings).
+      // Using LOGS_DEFAULT here would crash with "Attempt to use DefaultLogger
+      // but none has been registered". Fall back to stderr when no logger exists.
+      if (logging::LoggingManager::HasDefaultLogger()) {
+        LOGS_DEFAULT(WARNING) << "cpuinfo_initialize failed. "
+                                 "May cause CPU EP performance degradation due to undetected CPU features.";
+      } else {
+        std::cerr << "onnxruntime warning: cpuinfo_initialize failed. "
+                     "May cause CPU EP performance degradation due to undetected CPU features.\n";
+      }
+    }
+  }
+  ~PosixEnv() {
+    if (cpuinfo_available_) {
+      cpuinfo_deinitialize();
     }
   }
   bool cpuinfo_available_{false};

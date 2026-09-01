@@ -4,5 +4,6 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
-#include <migraphx/migraphx.h>
+#include <iso646.h>
 #include <migraphx/migraphx.hpp>
+#include <migraphx/version.h>

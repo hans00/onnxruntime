@@ -19,6 +19,9 @@
 #include "core/framework/fallback_cpu_capability.h"
 #include "DmlCommittedResourceAllocator.h"
 #include "DmlCommittedResourceWrapper.h"
+#include "core/session/onnxruntime_run_options_config_keys.h"
+#include "core/common/parse_string.h"
+#include "core/providers/dml/dml_provider_factory_creator.h"
 
 #ifdef ERROR
 #undef ERROR
@@ -27,6 +30,7 @@
 #define ERROR 0
 
 #include "core/session/onnxruntime_c_api.h"
+#include <iomanip>
 #include <wil/wrl.h>
 #ifndef _GAMING_XBOX
 #include <dxgi1_6.h>
@@ -40,6 +44,25 @@ namespace Dml
 {
     using namespace onnxruntime::common;
 
+#ifndef ORT_NO_EXCEPTIONS
+    static Status HResultToStatus(HRESULT hr, const char* operation, const char* details)
+    {
+        const StatusCode status_code = hr == E_INVALIDARG ? INVALID_ARGUMENT : FAIL;
+        return Status(
+            ONNXRUNTIME,
+            status_code,
+            onnxruntime::MakeString(
+                operation,
+                " failed with HRESULT 0x",
+                std::setfill('0'),
+                std::uppercase,
+                std::hex,
+                std::setw(8),
+                static_cast<uint32_t>(hr), ": ", details
+            ));
+    }
+#endif
+
     ExecutionProvider::~ExecutionProvider()
     {
         if (m_impl)
@@ -52,7 +75,7 @@ namespace Dml
         _Out_ std::shared_ptr<onnxruntime::KernelRegistry>* registry,
         _Out_ std::shared_ptr<const InternalRegistrationInfoMap>* internalRegInfoMap)
     {
-        ComPtr<AbiCustomRegistry> abiRegistry = wil::MakeOrThrow<AbiCustomRegistry>();
+        ComPtr<AbiCustomRegistry> abiRegistry = Dml::SafeMakeOrThrow<AbiCustomRegistry>();
         Dml::RegisterDmlOperators(abiRegistry.Get());
 
         assert(abiRegistry->GetRegistries().size() == 1);
@@ -66,12 +89,16 @@ namespace Dml
 
     ExecutionProvider::ExecutionProvider(
         IDMLDevice* dmlDevice,
-        ID3D12CommandQueue* commandQueue,
+        Dml::ExecutionContext* executionContext,
         bool enableMetacommands,
-        bool enableDynamicGraphFusion) :
-            IExecutionProvider(onnxruntime::kDmlExecutionProvider, OrtDevice(OrtDevice::GPU, OrtDevice::MemType::DEFAULT, 0))
+        bool enableGraphCapture,
+        bool enableSyncSpinning,
+        bool disableMemoryArena) :
+            IExecutionProvider(onnxruntime::kDmlExecutionProvider,
+                               OrtDevice(OrtDevice::DML, OrtDevice::MemType::DEFAULT, OrtDevice::VendorIds::MICROSOFT,
+                                         0))
     {
-        D3D12_COMMAND_LIST_TYPE queueType = commandQueue->GetDesc().Type;
+        D3D12_COMMAND_LIST_TYPE queueType = executionContext->GetCommandListTypeForQueue();
         if (queueType != D3D12_COMMAND_LIST_TYPE_DIRECT && queueType != D3D12_COMMAND_LIST_TYPE_COMPUTE)
         {
             // DML requires either DIRECT or COMPUTE command queues.
@@ -79,32 +106,38 @@ namespace Dml
         }
 
         ComPtr<ID3D12Device> device;
-        GRAPHICS_THROW_IF_FAILED(commandQueue->GetDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
+        GRAPHICS_THROW_IF_FAILED(dmlDevice->GetParentDevice(IID_GRAPHICS_PPV_ARGS(device.GetAddressOf())));
 
-        m_impl = wil::MakeOrThrow<ExecutionProviderImpl>(dmlDevice, device.Get(), commandQueue, enableMetacommands, enableDynamicGraphFusion);
+        m_impl = Dml::SafeMakeOrThrow<ExecutionProviderImpl>(dmlDevice, device.Get(), executionContext, enableMetacommands,
+                                                         enableGraphCapture, enableSyncSpinning, disableMemoryArena);
     }
 
     std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
     ExecutionProvider::GetCapability(
         const onnxruntime::GraphViewer& graph,
-        const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup) const
+        const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
+        const onnxruntime::GraphOptimizerRegistry& graph_optimizer_registry,
+        onnxruntime::IResourceAccountant* resource_accountant) const
     {
 #ifdef ENABLE_GRAPH_COMPILATION
-        return m_impl->GetCapability(graph, kernel_lookup);
+        return m_impl->GetCapability(graph, kernel_lookup, graph_optimizer_registry, resource_accountant, *GetLogger());
 #else
-        return onnxruntime::IExecutionProvider::GetCapability(graph, kernel_lookup);
+        return onnxruntime::IExecutionProvider::GetCapability(graph, kernel_lookup, graph_optimizer_registry, resource_accountant);
 #endif
     }
 
     void ExecutionProviderImpl::Close()
     {
+        // Release the cached command list references before closing the context
+        m_capturedGraphs.clear();
+
         m_context->Close();
     }
 
     void ExecutionProviderImpl::WaitForOutstandingWork()
     {
         Flush();
-        m_context->GetCurrentCompletionEvent().WaitForSignal();
+        m_context->GetCurrentCompletionEvent().WaitForSignal(m_cpuSyncSpinningEnabled);
     }
 
     HRESULT __stdcall ExecutionProviderImpl::AllocatePooledResource(
@@ -142,11 +175,14 @@ namespace Dml
         }
     }
 
-ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device* d3d12Device, ID3D12CommandQueue* queue, bool enableMetacommands, bool enableDynamicGraphFusion)
+    ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device* d3d12Device, ExecutionContext* executionContext, bool enableMetacommands, bool enableGraphCapture, bool enableCpuSyncSpinning, bool disableMemoryArena)
         : m_d3d12Device(d3d12Device),
           m_dmlDevice(dmlDevice),
           m_areMetacommandsEnabled(enableMetacommands),
-          m_dynamicGraphFusionEnabled(enableDynamicGraphFusion)
+          m_graphCaptureEnabled(enableGraphCapture),
+          m_cpuSyncSpinningEnabled(enableCpuSyncSpinning),
+          m_memoryArenaDisabled(disableMemoryArena),
+          m_context(executionContext)
     {
         D3D12_FEATURE_DATA_FEATURE_LEVELS featureLevels = {};
 
@@ -206,10 +242,8 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             m_areCustomHeapsSupported = options19.ComputeOnlyCustomHeapSupported;
         }
 
-        m_context = std::make_shared<ExecutionContext>(m_d3d12Device.Get(), m_dmlDevice.Get(), queue);
-
-        m_uploadHeap = std::make_unique<PooledUploadHeap>(m_d3d12Device.Get(), m_context);
-        m_readbackHeap = std::make_unique<ReadbackHeap>(m_d3d12Device.Get(), m_context);
+        m_uploadHeap = std::make_unique<PooledUploadHeap>(m_d3d12Device.Get(), m_context.Get());
+        m_readbackHeap = std::make_unique<ReadbackHeap>(m_d3d12Device.Get(), m_context.Get());
 
         CreateDmlKernelRegistry(&m_kernelRegistry, &m_internalRegInfoMap);
 
@@ -222,7 +256,7 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             // Create an allocator for D3D12 buffers used to hold tensor data. The returned buffers from the allocator
             // should be DEFAULT heap buffers which can be used as UAVs, and which start in UAV state.
             m_allocator = std::make_shared<BucketizedBufferAllocator>(m_d3d12Device.Get(),
-                m_context,  // TODO(leca): REVIEW: Will it cause memory issue when m_context is released in EP while alloc is released in sessionState?
+                m_context.Get(),  // TODO(leca): REVIEW: Will it cause memory issue when m_context is released in EP while alloc is released in sessionState?
                 CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
                 D3D12_HEAP_FLAG_NONE,
                 D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
@@ -230,7 +264,9 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
                 std::make_unique<DmlCommittedResourceAllocator>(m_d3d12Device.Get()));
             m_context->SetAllocator(m_allocator);
             // CPU Allocator used to create buffers for the MemcpyFromHost, Shape and Size operators.
-            m_cpuInputAllocator = std::make_shared<CPUAllocator>(OrtMemType::OrtMemTypeCPUInput);
+            OrtMemoryInfo memoryInfo(onnxruntime::CPU, OrtAllocatorType::OrtDeviceAllocator);
+            memoryInfo.mem_type = ::OrtMemType::OrtMemTypeCPUInput;
+            m_cpuInputAllocator = std::make_shared<onnxruntime::CPUAllocator>(memoryInfo);
         }
 
         return std::vector<onnxruntime::AllocatorPtr>{m_allocator, m_cpuInputAllocator,};
@@ -471,7 +507,12 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             const auto dstState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; // GPU resources are always kept in UAV state
 
             m_uploadHeap->BeginUploadToGpu(dstData, dstOffset, dstState, AsByteSpan(srcData, dataSizeInBytes));
-            FlushUploadsIfReady();
+
+            // Continuously upload memory located in upload heaps during session initialization to avoid running out of it
+            if (!m_sessionInitialized)
+            {
+                FlushUploadsIfReady();
+            }
         }
         else if (!src->IsCpuData() && dst->IsCpuData())
         {
@@ -522,12 +563,12 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         // Source and destination for batched GPU -> CPU copies
         std::vector<ID3D12Resource*> srcDatas;
         std::vector<void*> dstDatas;
-        std::vector<uint32_t> dataSizesInBytes;
+        std::vector<size_t> dataSizesInBytes;
 
         assert(!m_closed);
         auto provider = const_cast<ExecutionProviderImpl*>(this);
 
-        for (uint32_t i = 0; i < dst.size(); ++i)
+        for (size_t i = 0; i < dst.size(); ++i)
         {
             // This batching implementation only handles GPU -> CPU copies.  Other copies do not require synchronization
             // and are batched across multiple calls to CopyTensor.
@@ -538,15 +579,15 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             }
 
             const size_t dataSizeInBytes = ComputeByteSizeFromTensor(*dst[i]);
-            ORT_THROW_HR_IF(E_INVALIDARG, dataSizeInBytes != ComputeByteSizeFromTensor(*src[i])); // Tensors must be the same size
+            const size_t srcSizeInBytes = ComputeByteSizeFromTensor(*src[i]);
+            ORT_THROW_HR_IF(E_INVALIDARG, dataSizeInBytes != srcSizeInBytes); // Tensors must be the same size
 
             if (dataSizeInBytes == 0)
             {
                 continue;
             }
 
-            dataSizesInBytes.push_back(static_cast<uint32_t>(ComputeByteSizeFromTensor(*dst[i])));
-            ORT_THROW_HR_IF(E_INVALIDARG, dataSizesInBytes.back() != ComputeByteSizeFromTensor(*src[i])); // Tensors must be the same size
+            dataSizesInBytes.push_back(dataSizeInBytes);
 
             dstDatas.push_back(dst[i]->GetData());
             const AllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(src[i]).GetDataInterface().Get());
@@ -660,7 +701,7 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
 
     bool IsCpuOnDmlOperator(const onnxruntime::Node& node)
     {
-        auto cpuOnDmlOperators = std::array<const char*, 8>{
+        auto cpuOnDmlOperators = std::array<const char*, 9>{
             "SequenceAt",
             "SequenceConstruct",
             "SequenceEmpty",
@@ -668,7 +709,8 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             "SequenceErase",
             "SequenceInsert",
             "OptionalGetElement",
-            "OptionalHasElement"
+            "OptionalHasElement",
+            "If",
         };
 
         for (auto& cpuOnDmlOperator : cpuOnDmlOperators)
@@ -759,7 +801,10 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
                 // this branch could be reached with a bad custom operator or malformed file. If
                 // a legitimate case reaches here and DML needs to support a new input/output type
                 // besides tensors, then remove the assert.
-                assert(false);
+
+                // If the model has nodes that use Optional we will arrive here. It's a valid ONNX model but 
+                // TryGetTensorDataType doesn't handle Optional.              
+                // assert(false);
                 nodeContainsSupportedDataTypes = false;
                 return;
             }
@@ -859,8 +904,9 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
     std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
     ExecutionProviderImpl::GetCapability(
         const onnxruntime::GraphViewer& graph,
-        const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup) const
-    {
+        const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
+        const onnxruntime::GraphOptimizerRegistry& /* graph_optimizer_registry */,
+        onnxruntime::IResourceAccountant*, const onnxruntime::logging::Logger& logger) const {
         uint32_t deviceDataTypeMask = GetSupportedDeviceDataTypeMask(); // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
 
         std::vector<std::unique_ptr<onnxruntime::ComputeCapability>> result;
@@ -883,7 +929,7 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         }
 
         // Get the list of nodes that should stay on the CPU
-        auto cpuPreferredNodes = GetCpuPreferredNodes(graph, kernel_lookup, tentativeNodes);
+        auto cpuPreferredNodes = GetCpuPreferredNodes(graph, kernel_lookup, tentativeNodes, logger);
 
         for (size_t nodeIndex : toplogicalOrder)
         {
@@ -901,7 +947,7 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
 
     bool IsGpuTensor(const onnxruntime::Tensor& tensor)
     {
-        return strcmp(tensor.Location().name, onnxruntime::CPU) &&
+        return strcmp(tensor.Location().name.c_str(), onnxruntime::CPU) &&
             !(tensor.Location().mem_type == ::OrtMemType::OrtMemTypeCPUOutput || tensor.Location().mem_type == ::OrtMemType::OrtMemTypeCPUInput);
     }
 
@@ -933,12 +979,12 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         // Source and destination for batched GPU -> CPU copies
         std::vector<ID3D12Resource*> srcDatas;
         std::vector<void*> dstDatas;
-        std::vector<uint32_t> dataSizesInBytes;
+        std::vector<size_t> dataSizesInBytes;
 
         assert(!m_closed);
         auto provider = const_cast<ExecutionProviderImpl*>(this);
 
-        for (uint32_t i = 0; i < src_dst_pairs.size(); ++i)
+        for (size_t i = 0; i < src_dst_pairs.size(); ++i)
         {
             // This batching implementation only handles GPU -> CPU copies.  Other copies do not require synchronization
             // and are batched across multiple calls to CopyTensor.
@@ -961,15 +1007,19 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
                 true);
 
             const size_t dataSizeInBytes = ComputeByteSizeFromTensor(dstWrapper);
-            ORT_THROW_HR_IF(E_INVALIDARG, dataSizeInBytes != ComputeByteSizeFromTensor(srcWrapper)); // Tensors must be the same size
+            const size_t srcSizeInBytes = ComputeByteSizeFromTensor(srcWrapper);
+            if (dataSizeInBytes != srcSizeInBytes)
+            {
+                return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "DML tensor size mismatch. src size: ",
+                                       srcSizeInBytes, " dst size: ", dataSizeInBytes);
+            }
 
             if (dataSizeInBytes == 0)
             {
-                return onnxruntime::common::Status::OK();
+                continue;
             }
 
-            dataSizesInBytes.push_back(static_cast<uint32_t>(ComputeByteSizeFromTensor(dstWrapper)));
-            ORT_THROW_HR_IF(E_INVALIDARG, dataSizesInBytes[i] != ComputeByteSizeFromTensor(srcWrapper)); // Tensors must be the same size
+            dataSizesInBytes.push_back(dataSizeInBytes);
 
             dstDatas.push_back(dstWrapper.GetData());
             const AllocationInfo* srcAllocInfo = m_allocator->DecodeDataHandle(MLOperatorTensor(&srcWrapper).GetDataInterface().Get());
@@ -977,11 +1027,21 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
             srcDatas.push_back(srcAllocInfo->GetResource());
         }
 
-        const uint64_t srcOffset = 0;
         const auto srcState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS; // GPU resources are always kept in UAV state
 
         // Performs a blocking call to synchronize and read back data from the GPU into the destination buffer
-        m_readbackHeap->ReadbackFromGpu(dstDatas, dataSizesInBytes, srcDatas, srcState);
+#ifndef ORT_NO_EXCEPTIONS
+        ORT_TRY
+        {
+#endif
+            m_readbackHeap->ReadbackFromGpu(dstDatas, dataSizesInBytes, srcDatas, srcState);
+#ifndef ORT_NO_EXCEPTIONS
+        }
+        ORT_CATCH(const wil::ResultException& ex)
+        {
+            return HResultToStatus(ex.GetErrorCode(), "DML GPU readback", ex.what());
+        }
+#endif
 
         return onnxruntime::common::Status::OK();
     }
@@ -1128,10 +1188,20 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         return m_areMetacommandsEnabled;
     }
 
-    bool ExecutionProviderImpl::DynamicGraphFusionEnabled() const noexcept
+    bool ExecutionProviderImpl::CpuSyncSpinningEnabled() const noexcept
     {
-        return m_dynamicGraphFusionEnabled;
+        return m_cpuSyncSpinningEnabled;
     }
+
+    bool ExecutionProviderImpl::GraphCaptureEnabled() const noexcept
+    {
+        return m_graphCaptureEnabled;
+    }
+
+    bool ExecutionProviderImpl::GraphCaptured(int graph_annotation_id) const
+    {
+        return m_graphCapturingDone.find(graph_annotation_id) != m_graphCapturingDone.end();
+    };
 
     std::shared_ptr<const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap>
     ExecutionProviderImpl::GetInternalRegistrationInfoMap() const
@@ -1155,24 +1225,79 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         // This reduces memory usage immediately after session creation, and avoids
         // performance impact of deallocation during first evaluation.
         Flush();
-        m_context->GetCurrentCompletionEvent().WaitForSignal();
+        m_context->GetCurrentCompletionEvent().WaitForSignal(m_cpuSyncSpinningEnabled);
         m_context->ReleaseCompletedReferences();
         m_uploadHeap->Trim();
 
-        // Allocations after this point are potentially transient and their sizes are
-        // rounded to enable pooling.
-        m_allocator->SetDefaultRoundingMode(AllocatorRoundingMode::Enabled);
+        if (!m_memoryArenaDisabled)
+        {
+            // Allocations after this point are potentially transient and their sizes are
+            // rounded to enable pooling.
+            m_allocator->SetDefaultRoundingMode(AllocatorRoundingMode::Enabled);
+        }
 
+        m_sessionInitialized = true;
+
+        return onnxruntime::common::Status::OK();
+    }
+
+    void ExecutionProviderImpl::AppendCapturedGraph(int annotationId, std::unique_ptr<DmlReusedCommandListState> capturedGraph)
+    {
+        m_capturedGraphs[annotationId].push_back(std::move(capturedGraph));
+    }
+
+    onnxruntime::common::Status ExecutionProviderImpl::ReplayGraph(int graph_annotation_id)
+    {
+        for (auto& capturedGraph : m_capturedGraphs[graph_annotation_id])
+        {
+            ExecuteCommandList(capturedGraph->graphicsCommandList.Get(), &capturedGraph->fence, &capturedGraph->completionValue);
+        }
+
+        return onnxruntime::common::Status::OK();
+    }
+
+    Status ExecutionProviderImpl::OnRunStart(const onnxruntime::RunOptions& run_options)
+    {
+        if (GraphCaptureEnabled())
+        {
+            auto graphAnnotationStr = run_options.config_options.GetConfigEntry(kOrtRunOptionsConfigCudaGraphAnnotation);
+            // If graph annotation is not provided, fall back to the one dml graph per session behavior
+            int dmlGraphAnnotationId = 0;
+            if (graphAnnotationStr.has_value())
+            {
+                ORT_ENFORCE(onnxruntime::TryParseStringWithClassicLocale<int>(*graphAnnotationStr, dmlGraphAnnotationId),
+                            "Failed to parse the dml graph annotation id: ",
+                            *graphAnnotationStr);
+            }
+
+            m_currentGraphAnnotationId = dmlGraphAnnotationId;
+        }
+
+        return onnxruntime::common::Status::OK();
+    }
+
+    Status ExecutionProviderImpl::OnRunEnd()
+    {
+        if (GraphCaptureEnabled() && m_currentGraphAnnotationId != -1)
+        {
+            m_graphCapturingDone.insert(m_currentGraphAnnotationId);
+        }
+
+        // Flush any pending work to the GPU, but don't block for completion, permitting it
+        // to overlap other work.
+        Flush();
         return onnxruntime::common::Status::OK();
     }
 
     std::unique_ptr<onnxruntime::IExecutionProvider> CreateExecutionProvider(
         IDMLDevice* dmlDevice,
-        ID3D12CommandQueue* commandQueue,
+        Dml::ExecutionContext* executionContext,
         bool enableMetacommands,
-        bool enableDynamicGraphFusion)
+        bool enableGraphCapture,
+        bool enableCpuSyncSpinning,
+        bool disableMemoryArena)
     {
-        return std::make_unique<Dml::ExecutionProvider>(dmlDevice, commandQueue, enableMetacommands, enableDynamicGraphFusion);
+        return std::make_unique<Dml::ExecutionProvider>(dmlDevice, executionContext, enableMetacommands, enableGraphCapture, enableCpuSyncSpinning, disableMemoryArena);
     }
 
     ID3D12Resource* GetD3D12ResourceFromAllocation(onnxruntime::IAllocator* allocator, void* ptr)
@@ -1208,9 +1333,9 @@ ExecutionProviderImpl::ExecutionProviderImpl(IDMLDevice* dmlDevice, ID3D12Device
         uint64_t pooledResourceId = 0; // Not a pooled resource
 
         ComPtr<DmlResourceWrapper> resourceWrapper;
-        wil::MakeOrThrow<DmlCommittedResourceWrapper>(pResource).As(&resourceWrapper);
+        Dml::SafeMakeOrThrow<DmlCommittedResourceWrapper>(pResource).As(&resourceWrapper);
 
-        ComPtr<AllocationInfo> allocInfo = wil::MakeOrThrow<AllocationInfo>(nullptr, 0, pooledResourceId, resourceWrapper.Get(), (size_t)pResource->GetDesc().Width);
+        ComPtr<AllocationInfo> allocInfo = Dml::SafeMakeOrThrow<AllocationInfo>(nullptr, 0, pooledResourceId, resourceWrapper.Get(), (size_t)pResource->GetDesc().Width);
         return allocInfo.Detach();
     }
     void FreeGPUAllocation(void* ptr)

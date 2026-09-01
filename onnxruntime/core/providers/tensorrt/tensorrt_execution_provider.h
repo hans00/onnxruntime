@@ -3,14 +3,26 @@
 
 #pragma once
 #include <ctime>
+#ifndef USE_CUDA_MINIMAL
 #include <cudnn.h>
-#include <cublas_v2.h>
-
+#else
+typedef void* cudnnHandle_t;
+typedef void* cublasHandle_t;
+typedef void* cudnnStatus_t;
+#endif
 #include "core/providers/tensorrt/nv_includes.h"
 
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 #include "core/providers/cuda/cuda_graph.h"
 #include "tensorrt_execution_provider_info.h"
+
+// These types used to come from NvOnnxParser.h, but they've been removed.
+#if NV_TENSORRT_MAJOR >= 11
+#include <utility>
+#include <vector>
+using SubGraph_t = std::pair<std::vector<size_t>, bool>;
+using SubGraphCollection_t = std::vector<SubGraph_t>;
+#endif
 
 namespace onnxruntime {
 
@@ -19,6 +31,7 @@ static const std::string kMaxPartitionIterations = "ORT_TENSORRT_MAX_PARTITION_I
 static const std::string kMinSubgraphSize = "ORT_TENSORRT_MIN_SUBGRAPH_SIZE";
 static const std::string kMaxWorkspaceSize = "ORT_TENSORRT_MAX_WORKSPACE_SIZE";
 static const std::string kFP16Enable = "ORT_TENSORRT_FP16_ENABLE";
+static const std::string kBF16Enable = "ORT_TENSORRT_BF16_ENABLE";
 static const std::string kINT8Enable = "ORT_TENSORRT_INT8_ENABLE";
 static const std::string kINT8CalibrationTableName = "ORT_TENSORRT_INT8_CALIBRATION_TABLE_NAME";
 static const std::string kINT8UseNativeTensorrtCalibrationTable = "ORT_TENSORRT_INT8_USE_NATIVE_CALIBRATION_TABLE";
@@ -27,7 +40,9 @@ static const std::string kDLACore = "ORT_TENSORRT_DLA_CORE";
 static const std::string kDumpSubgraphs = "ORT_TENSORRT_DUMP_SUBGRAPHS";
 static const std::string kEngineCacheEnable = "ORT_TENSORRT_ENGINE_CACHE_ENABLE";
 static const std::string kCachePath = "ORT_TENSORRT_CACHE_PATH";
-// As a timing cache can be used across multiple ONNX files it makes sense to have a seperate cache path
+static const std::string kWeightStrippedEngineEnable = "ORT_TENSORRT_WEIGHT_STRIPPED_ENGINE_ENABLE";
+static const std::string kOnnxModelFolderPath = "ORT_TENSORRT_ONNX_MODEL_FOLDER_PATH";
+// As a timing cache can be used across multiple ONNX files it makes sense to have a separate cache path
 static const std::string kTimingCachePath = "ORT_TENSORRT_GLOBAL_CACHE_PATH";
 static const std::string kDecryptionEnable = "ORT_TENSORRT_ENGINE_DECRYPTION_ENABLE";
 static const std::string kDecryptionLibPath = "ORT_TENSORRT_ENGINE_DECRYPTION_LIB_PATH";
@@ -51,6 +66,7 @@ static const std::string kDumpEpContextModel = "ORT_DUMP_EP_CONTEXT_MODEL";
 static const std::string kEpContextEmbedMode = "ORT_EP_CONTEXT_EMBED_MODE";
 static const std::string kEpContextComputeCapabilityEnable = "ORT_EP_CONTEXT_COMPUTE_CAPABILITY_ENABLE";
 static const std::string kEngineCachePrefix = "ORT_TENSORRT_CACHE_PREFIX";
+static const std::string kOpTypesToExclude = "ORT_TENSORRT_OP_TYPES_TO_EXCLUDE";
 // Old env variable for backward compatibility
 static const std::string kEngineCachePath = "ORT_TENSORRT_ENGINE_CACHE_PATH";
 }  // namespace tensorrt_env_vars
@@ -85,6 +101,12 @@ class TensorrtLogger : public nvinfer1::ILogger {
       }
     }
   }
+  void set_level(Severity verbosity) {
+    verbosity_ = verbosity;
+  }
+  Severity get_level() const {
+    return verbosity_;
+  }
 };
 
 namespace tensorrt_ptr {
@@ -108,8 +130,11 @@ using unique_pointer = std::unique_ptr<T, TensorrtInferDeleter>;
 //
 class OutputAllocator : public nvinfer1::IOutputAllocator {
  public:
+#if NV_TENSORRT_MAJOR >= 10
+  void* reallocateOutputAsync(char const* tensorName, void* currentMemory, uint64_t size, uint64_t alignment, cudaStream_t stream) noexcept override;
+#else
   void* reallocateOutput(char const* tensorName, void* currentMemory, uint64_t size, uint64_t alignment) noexcept override;
-
+#endif
   void notifyShape(char const* tensorName, nvinfer1::Dims const& dims) noexcept override;
 
   void* getBuffer() {
@@ -134,7 +159,33 @@ class OutputAllocator : public nvinfer1::IOutputAllocator {
   std::vector<int64_t> output_shapes;
 };
 
+/*
+ * This map saves the dimension range of the shape of the shape tensor or execution tensor:
+ * tensor name -> ( dimension -> [min, max, opt] )
+ */
 using ShapeRangesMap = std::unordered_map<std::string, std::unordered_map<size_t, std::vector<std::vector<int64_t>>>>;
+
+// Struct to hold user weights when ModelProtos are serialized with data.
+class TensorrtUserWeights {
+ public:
+  TensorrtUserWeights(const std::string& name, const std::string& data) : name_(name), data_(data) {};
+
+  const char* Name() const {
+    return name_.c_str();
+  };
+
+  const void* Data() const {
+    return static_cast<void const*>(data_.data());
+  }
+
+  int64_t Size() const {
+    return static_cast<int64_t>(data_.size());
+  }
+
+ private:
+  std::string name_{};
+  std::string data_{};
+};
 
 // Information to construct kernel function state.
 struct TensorrtFuncState {
@@ -150,13 +201,13 @@ struct TensorrtFuncState {
   std::vector<std::unordered_map<std::string, size_t>> input_info;
   std::vector<std::unordered_map<std::string, size_t>> output_info;
   std::unordered_map<std::string, std::unordered_map<size_t, std::vector<std::vector<int64_t>>>> input_shape_ranges;
-  OrtMutex* tensorrt_mu_ptr = nullptr;
+  std::mutex* tensorrt_mu_ptr = nullptr;
   bool fp16_enable = false;
+  bool bf16_enable = false;
   bool int8_enable = false;
   bool int8_calibration_cache_available = false;
   bool dla_enable = false;
   int dla_core = 0;
-  size_t* max_workspace_size_ptr = nullptr;
   std::string trt_node_name_with_precision;
   bool engine_cache_enable = false;
   std::string engine_cache_path;
@@ -164,6 +215,7 @@ struct TensorrtFuncState {
   std::vector<nvinfer1::IOptimizationProfile*> profiles;
   bool context_memory_sharing_enable = false;
   size_t* max_context_mem_size_ptr = nullptr;
+  IAllocatorUniquePtr<void>* context_memory = nullptr;
   std::unordered_map<std::string, float> dynamic_range_map;
   bool engine_decryption_enable = false;
   int (*engine_decryption)(const char*, char*, size_t*) = nullptr;
@@ -181,6 +233,9 @@ struct TensorrtFuncState {
   bool cuda_graph_enable = 0;
   std::string cache_prefix;
   std::string cache_suffix;
+  bool engine_hw_compatible = false;
+  std::vector<nvinfer1::PreviewFeature> preview_features;
+  std::unique_ptr<std::vector<TensorrtUserWeights>>* userWeights = nullptr;
 };
 
 // Minimum information to construct kernel function state for direct engine load code path
@@ -195,7 +250,8 @@ struct TensorrtShortFuncState {
   std::vector<std::unordered_map<std::string, size_t>> output_info;
   bool context_memory_sharing_enable = false;
   size_t* max_context_mem_size_ptr = nullptr;
-  OrtMutex* tensorrt_mu_ptr = nullptr;
+  IAllocatorUniquePtr<void>* context_memory = nullptr;
+  std::mutex* tensorrt_mu_ptr = nullptr;
 };
 
 // Holds important information for building valid ORT graph.
@@ -207,6 +263,7 @@ struct SubGraphContext {
 
 using SubGraphContextMap = std::unordered_map<std::string, std::unique_ptr<SubGraphContext>>;
 using DDSOutputAllocatorMap = std::unordered_map<std::string, std::unique_ptr<OutputAllocator>>;
+std::string GetWeightRefittedEnginePath(std::string engine_cache_path);
 
 // Logical device representation.
 class TensorrtExecutionProvider : public IExecutionProvider {
@@ -227,7 +284,9 @@ class TensorrtExecutionProvider : public IExecutionProvider {
 
   std::vector<std::unique_ptr<ComputeCapability>>
   GetCapability(const GraphViewer& graph,
-                const IKernelLookup& /*kernel_lookup*/) const override;
+                const IKernelLookup& /*kernel_lookup*/,
+                const GraphOptimizerRegistry& graph_optimizer_registry,
+                IResourceAccountant* /* resource_accountant */) const override;
 
   int GetDeviceId() const { return device_id_; }
 
@@ -251,7 +310,18 @@ class TensorrtExecutionProvider : public IExecutionProvider {
 
   bool IsGraphCaptureEnabled() const override;
   bool IsGraphCaptured(int graph_annotation_id) const override;
-  Status ReplayGraph(int graph_annotation_id) override;
+  Status ReplayGraph(int graph_annotation_id, bool sync = true) override;
+
+  static common::Status RefitEngine(std::string onnx_model_filename,
+                                    std::string& onnx_model_folder_path,
+                                    std::string& weight_stripped_engine_cath_path,
+                                    const void* onnx_model_bytestream,
+                                    size_t onnx_model_bytestream_size,
+                                    const void* onnx_external_data_bytestream,
+                                    size_t onnx_external_data_bytestream_size,
+                                    nvinfer1::ICudaEngine* trt_engine,
+                                    bool serialize_refitted_engine,
+                                    bool detailed_build_log);
 
  private:
   mutable TensorrtExecutionProviderInfo info_;
@@ -259,8 +329,9 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   cudaStream_t stream_ = nullptr;
   int max_partition_iterations_ = 1000;
   size_t min_subgraph_size_ = 1;
-  size_t max_workspace_size_ = 1 << 30;  // 1GB
+  size_t max_workspace_size_ = 0;
   bool fp16_enable_ = false;
+  bool bf16_enable_ = false;
   bool int8_enable_ = false;
   bool dla_enable_ = false;
   int dla_core_ = 0;
@@ -270,6 +341,13 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   bool int8_use_native_tensorrt_calibration_table_ = false;
   bool dump_subgraphs_ = false;
   bool engine_cache_enable_ = false;
+  bool weight_stripped_engine_enable_ = false;
+  bool weight_stripped_engine_refit_ = false;
+  std::string onnx_model_folder_path_;
+  const void* onnx_model_bytestream_;
+  size_t onnx_model_bytestream_size_;
+  const void* onnx_external_data_bytestream_ = nullptr;
+  size_t onnx_external_data_bytestream_size_ = 0;
   bool build_heuristics_enable_ = false;
   bool sparsity_enable_ = false;
   int builder_optimization_level_ = 3;
@@ -277,7 +355,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   std::string tactic_sources_;
   std::string global_cache_path_, cache_path_, engine_decryption_lib_path_;
   std::unique_ptr<nvinfer1::IRuntime> runtime_ = nullptr;
-  OrtMutex tensorrt_mu_;
+  std::mutex tensorrt_mu_;
   int device_id_;
   std::string compute_capability_;
   bool context_memory_sharing_enable_ = false;
@@ -293,6 +371,14 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   bool detailed_build_log_ = false;
   bool cuda_graph_enable_ = false;
   std::string cache_prefix_;
+  bool engine_hw_compatible_ = false;
+  std::string op_types_to_exclude_;
+  std::vector<nvinfer1::PreviewFeature> preview_features_;
+  bool load_user_initializer_ = false;
+
+  // The format is as for TENSORRT_VERSION: (MAJOR * 100 + MINOR) * 100 + PATCH
+  int32_t trt_version_;
+  int32_t cuda_version_;
 
   // The OrtAllocator object will be get during ep compute time
   // and should be kept for the lifetime of TRT EP object.
@@ -329,6 +415,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   std::unordered_map<std::string, ShapeRangesMap> input_shape_ranges_;  // The profile shape ranges that the engine is built with
   std::unordered_map<std::string, std::vector<nvinfer1::IOptimizationProfile*>> profiles_;
   std::unordered_map<std::string, DDSOutputAllocatorMap> dds_output_allocator_maps_;
+  std::unordered_map<std::string, std::unique_ptr<std::vector<TensorrtUserWeights>>> weights_;  // User provided weights.
 
   // for external stream, we need to create its cudnn/cublass handle before cuda EP enable cuda graph capture
   cudnnHandle_t external_cudnn_handle_ = nullptr;
@@ -440,7 +527,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
     std::set<std::weak_ptr<PerThreadContextMap>, std::owner_less<std::weak_ptr<PerThreadContextMap>>>
         caches_to_update_on_destruction;
     // synchronizes access to PerThreadContextState members
-    OrtMutex mutex;
+    std::mutex mutex;
   };
 
   // The execution provider maintains the PerThreadContexts in this structure.
@@ -473,7 +560,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
   Every api call not in the thread-safe operations(https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#threading)
   should be protected by a lock when invoked by multiple threads concurrently.
   */
-  std::unique_lock<OrtMutex> GetApiLock() const;
+  std::unique_lock<std::mutex> GetApiLock() const;
 
   /**Check the graph is the subgraph of control flow op*/
   bool IsSubGraphOfControlFlowOp(const GraphViewer& graph) const;
@@ -489,7 +576,7 @@ class TensorrtExecutionProvider : public IExecutionProvider {
    * and save those information in subgraph context data structure. It's useful for building a valid graph and
    * make Graph::Resolve() happy especially when dealing with nested control-flow op graph.
    */
-  void BuildSubGraphContext(const Graph& build_graph) const;
+  void BuildSubGraphContext(Graph& build_graph) const;
 
   /**
    * Set outer scope values for subgraphs and add thoes values as top-level graph's inputs if needed.
@@ -548,6 +635,36 @@ class TensorrtExecutionProvider : public IExecutionProvider {
    * Get the pointer to the IBuilder instance.
    * This function only creates the instance at the first time it's being called."
    */
-  nvinfer1::IBuilder* GetBuilder() const;
+  nvinfer1::IBuilder* GetBuilder(TensorrtLogger& trt_logger) const;
+
+  /**
+   *  This is the helper function for ConstantFoldingDQ graph transformer.
+   *
+   *  It selects the qualified/required DQ node to be optimized as well as provides a mapping table
+   *  to help TRT EP later include the DQ node which is filtered out by TRT parser.
+   */
+  void SelectQualifiedDQNode(const GraphViewer& graph,
+                             std::unordered_set<NodeIndex>& selection_node_set,
+                             std::unordered_map<NodeIndex, NodeIndex>& consumer_to_dq) const;
+
+  /**
+   * This function returns an optimization ComputeCapability that is limited to:
+   *  1. the DQ nodes in this individual TRT ComputeCapability
+   *  2. the DQ nodes that are qualified and selected by TRT EP
+   *
+   * It also needs to make sure the DQ nodes is a subset of the complete list of DQ nodes to optimize in original selection ComputeCapability.
+   * Finally, copy the optimization function from the original selection ComputeCapability.
+   */
+  std::unique_ptr<ComputeCapability> CreateOptimizationComputeCapability(ComputeCapability* selection_cc,
+                                                                         std::unordered_set<NodeIndex>& trt_selection_node_set,
+                                                                         ComputeCapability* trt_cc) const;
+  /**
+   * This function helps add back the DQ nodes that are filtered out by TRT parser.
+   * The reason is the DQ nodes can be optimized and dequantized by applying ConstantFoldingDQ optimizer by ORT L2+ optimization.
+   */
+  void UpdateSupportedNodeVectorForDQ(const GraphViewer& graph,
+                                      SubGraph_t& supported_node_vector,
+                                      SubGraphCollection_t& supported_nodes_vector,
+                                      std::unordered_map<NodeIndex, NodeIndex> consumer_to_dq) const;
 };
 }  // namespace onnxruntime

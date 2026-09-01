@@ -24,7 +24,7 @@ namespace openvino_ep {
 int GetInputCount(const Node* node, const InitializedTensorSet& initializer_set) {
   int count = 0;
   for (const auto& input : node->InputDefs()) {
-    auto name = input->Name();
+    const auto& name = input->Name();
     auto it = initializer_set.find(name);
     if (it == initializer_set.end()) {
       count++;
@@ -151,6 +151,24 @@ GetConnectedClusters(const GraphViewer& graph_viewer, const std::vector<std::vec
     }
   }
   return connected_clusters;
+}
+
+bool AddTrivialClusterToNextClusterIfConnected(const GraphViewer& graph_viewer,
+                                               const NodeIndex curr_node_index,
+                                               const std::vector<NodeIndex>& search_cluster) {
+  for (auto index : search_cluster) {
+    auto curr_node = graph_viewer.GetNode(index);
+    for (auto node = curr_node->InputNodesBegin(); node != curr_node->InputNodesEnd(); ++node) {
+      if ((*node).Index() == curr_node_index)
+        return true;
+    }
+
+    for (auto node = curr_node->OutputNodesBegin(); node != curr_node->OutputNodesEnd(); ++node) {
+      if ((*node).Index() == curr_node_index)
+        return true;
+    }
+  }
+  return false;
 }
 
 void GetInputsOutputsOfCluster(const GraphViewer& graph_viewer,

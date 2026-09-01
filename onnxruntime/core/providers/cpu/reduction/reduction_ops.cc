@@ -13,7 +13,6 @@
 #endif
 using namespace std;
 namespace onnxruntime {
-
 #define REGISTER_UNARY_ELEMENTWISE_KERNEL(x, sinceVersion)                            \
   ONNX_CPU_OPERATOR_TYPED_KERNEL(                                                     \
       x,                                                                              \
@@ -123,30 +122,42 @@ namespace onnxruntime {
       x<bool>);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL1, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL1, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL1, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL1, 11, 12);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL1, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL1, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL1, 13, 17);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL1, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL1, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ReduceL1, 18);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceL1, 18);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceL1, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL2, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL2, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL2, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL2, 11, 12);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL2, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL2, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceL2, 13, 17);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceL2, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceL2, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ReduceL2, 18);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceL2, 18);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceL2, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceLogSum, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceLogSum, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceLogSum, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceLogSum, 11, 12);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceLogSum, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceLogSum, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceLogSum, 13, 17);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceLogSum, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceLogSum, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ReduceLogSum, 18);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceLogSum, 18);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceLogSum, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceLogSumExp, 1, 10);
@@ -202,6 +213,10 @@ REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceMean, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceMean, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceMean, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceMean, 18);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceMean, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceMean, 11, 12);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceMean, 13, 17);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceMean, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceMin, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceMin, 1, 10);
@@ -236,12 +251,16 @@ REGISTER_UNARY_ELEMENTWISE_KERNEL_UINT8_ONLY(ReduceMin, 20);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_BOOL_ONLY(ReduceMin, 20);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceProd, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceProd, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceProd, 1, 10);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceProd, 11, 12);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceProd, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceProd, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceProd, 13, 17);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ReduceProd, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ReduceProd, 13, 17);
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ReduceProd, 18);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceProd, 18);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceProd, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ReduceSum, 1, 10);
@@ -268,22 +287,36 @@ REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ReduceSumSquare, 18);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ReduceSumSquare, 18);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ArgMax, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ArgMax, 1, 10)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT8_ONLY(ArgMax, 1, 10)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ArgMax, 1, 10)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_UINT8_ONLY(ArgMax, 1, 10)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ArgMax, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ArgMax, 11, 12)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT8_ONLY(ArgMax, 11, 12)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ArgMax, 11, 12)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_UINT8_ONLY(ArgMax, 11, 12)
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ArgMax, 13);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ArgMax, 13);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ArgMax, 13);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_INT8_ONLY(ArgMax, 13);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_UINT8_ONLY(ArgMax, 13);
 
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ArgMin, 1, 10);
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ArgMin, 1, 10)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT8_ONLY(ArgMin, 1, 10)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ArgMin, 1, 10)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_UINT8_ONLY(ArgMin, 1, 10)
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL(ArgMin, 11, 12);
 REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_DOUBLE_ONLY(ArgMin, 11, 12)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT8_ONLY(ArgMin, 11, 12)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_INT64_ONLY(ArgMin, 11, 12)
+REGISTER_UNARY_ELEMENTWISE_VERSIONED_KERNEL_UINT8_ONLY(ArgMin, 11, 12)
 REGISTER_UNARY_ELEMENTWISE_KERNEL(ArgMin, 13);
 REGISTER_UNARY_ELEMENTWISE_KERNEL_DOUBLE_ONLY(ArgMin, 13);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_INT64_ONLY(ArgMin, 13);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_INT8_ONLY(ArgMin, 13);
+REGISTER_UNARY_ELEMENTWISE_KERNEL_UINT8_ONLY(ArgMin, 13);
 
 FastReduceKind operator|(FastReduceKind a, FastReduceKind b) {
   return static_cast<FastReduceKind>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
@@ -726,14 +759,10 @@ bool CommonFastReduceCopy(OpKernelContext* ctx, TensorShapeVector& input_axes, b
     } else {
       input_axes.clear();
     }
-
+    // noop_with_empty_axes is handled upstream by ApplyNoopEmptyAxesElementwise().
+    // Return false for clarity and to prevent unsafe memcpy fallback.
     if (input_axes.empty() && noop_with_empty_axes) {
-      const Tensor* input = ctx->Input<Tensor>(0);
-      auto* output = ctx->Output(0, input->Shape());
-      memcpy(output->MutableDataRaw(),
-             input->DataRaw(),
-             input->SizeInBytes());
-      return true;
+      return false;
     }
   }
   return false;
@@ -755,7 +784,6 @@ bool CommonFastReduceSwitch(OpKernelContext* ctx,
                             fast_reduce_fct* case_rk,
                             fast_reduce_fct* case_krk,
                             fast_reduce_fct* case_rkr) {
-  TensorShapeVector axes;
   const Tensor* input = ctx->Input<Tensor>(0);
   auto reduced_dims = input->Shape().GetDims();
   TensorShapeVector input_axes;
@@ -767,7 +795,6 @@ bool CommonFastReduceSwitch(OpKernelContext* ctx,
   fast_kind = OptimizeShapeForFastReduce(
       reduced_dims, input_axes.empty() ? axes_ : input_axes,
       fast_shape, output_shape, fast_axes, keepdims_ != 0, noop_with_empty_axes);
-
   if (which_fast_reduce != FastReduceKind::kNone) {
     if (IsFastReduceKindAvailable(fast_kind, which_fast_reduce)) {
       Tensor* output = ctx->Output(0, output_shape);
@@ -858,9 +885,12 @@ bool check_and_reduce_empty_set_input(OpKernelContext* ctx, const gsl::span<cons
     ORT_ENFORCE(axes.empty(), "Axes input and attribute should not both be present for reduction.");
     // second input holds the axes.
     const Tensor* axes_tensor = ctx->Input<Tensor>(1);
-    auto nDims = static_cast<size_t>(axes_tensor->Shape()[0]);
-    const auto* data = axes_tensor->Data<int64_t>();
-    input_axes.insert(input_axes.begin(), data, data + nDims);
+    if (axes_tensor != nullptr) {
+      ORT_ENFORCE(axes_tensor->Shape().NumDimensions() == 1,
+                  "An axes tensor must be a vector tensor.");
+      const auto axes_data = axes_tensor->DataAsSpan<int64_t>();
+      input_axes.assign(axes_data.begin(), axes_data.end());
+    }
   } else {
     input_axes.resize(axes.size());
     std::copy(axes.begin(), axes.end(), input_axes.begin());
@@ -887,10 +917,69 @@ bool check_and_reduce_empty_set_input(OpKernelContext* ctx, const gsl::span<cons
   return true;
 }
 
+// Handles the ONNX noop_with_empty_axes=1 behavior when axes=[] for reduction operators.
+// In this case no reduction is performed. Instead, for aggregators with element-wise
+// transforms (PreOp/PostOp), the transform is applied to each input element.
+// For identity aggregators, the input is copied directly to the output.
+template <typename AGG>
+inline void ApplyNoopEmptyAxesElementwise(OpKernelContext* ctx) {
+  const Tensor* X = ctx->Input<Tensor>(0);
+  const auto& shape = X->Shape();
+  Tensor* Y = ctx->Output(0, shape);
+
+  if constexpr (!ReduceAggTraits<AGG>::kHasPreOp && !ReduceAggTraits<AGG>::kHasPostOp) {
+    if (X->SizeInBytes() > 0) {
+      std::memcpy(Y->MutableDataRaw(), X->DataRaw(), X->SizeInBytes());
+    }
+
+  } else {
+    using Tin = typename AGG::input_type;
+    using Tacc = typename AGG::value_type;
+    const Tin* x = X->Data<Tin>();
+    Tacc* y = Y->MutableData<Tacc>();
+    const int64_t n = shape.Size();
+
+    for (int64_t i = 0; i < n; ++i) {
+      AGG agg(1, x[i]);
+      agg.update0(x[i]);
+      agg.update(x[i]);
+      y[i] = agg.get_value();
+    }
+  }
+}
+
+// Returns the effective reduction axes.
+// If an axes input tensor is provided, it takes precedence over the axes attribute.
+inline gsl::span<const int64_t> GetEffectiveAxes(
+    OpKernelContext* ctx,
+    const gsl::span<const int64_t> axes_attr,
+    TensorShapeVector& axes_from_input) {
+  axes_from_input.clear();
+
+  if (ctx->InputCount() > 1) {
+    const Tensor* axes_tensor = ctx->Input<Tensor>(1);
+    if (axes_tensor) {
+      ORT_ENFORCE(axes_tensor->Shape().NumDimensions() == 1, "An axes tensor must be a vector tensor.");
+      const auto span = axes_tensor->DataAsSpan<int64_t>();
+      axes_from_input.assign(span.begin(), span.end());
+      return gsl::make_span(axes_from_input);
+    }
+  }
+
+  return axes_attr;
+}
+
 template <typename AGG>
 void CommonReduce1Loop(OpKernelContext* ctx,
                        const gsl::span<const int64_t>& axes_, int64_t keepdims_,
                        bool noop_with_empty_axes) {
+  TensorShapeVector tmp_axes;
+  auto effective_axes = GetEffectiveAxes(ctx, axes_, tmp_axes);
+  if (effective_axes.empty() && noop_with_empty_axes) {
+    ApplyNoopEmptyAxesElementwise<AGG>(ctx);
+    return;
+  }
+
   if (check_and_reduce_empty_set_input<AGG>(ctx, axes_, keepdims_ != 0)) {
     return;
   }
@@ -906,6 +995,7 @@ void CommonReduce1Loop(OpKernelContext* ctx,
 
   const Tensor* input = ctx->Input<Tensor>(0);
   Tensor* output = ctx->Output(0, output_shape);
+
   if (fast_kind == FastReduceKind::kEmpty) {
     const TensorShape& input_shape = input->Shape();
     if (input_shape.Size() == 1) {
@@ -928,6 +1018,13 @@ template <typename AGG>
 void CommonReduce2Loops(OpKernelContext* ctx,
                         const gsl::span<const int64_t>& axes_, int64_t keepdims_,
                         bool noop_with_empty_axes) {
+  TensorShapeVector tmp_axes;
+  auto effective_axes = GetEffectiveAxes(ctx, axes_, tmp_axes);
+  if (effective_axes.empty() && noop_with_empty_axes) {
+    ApplyNoopEmptyAxesElementwise<AGG>(ctx);
+    return;
+  }
+
   if (check_and_reduce_empty_set_input<AGG>(ctx, axes_, keepdims_ != 0)) {
     return;
   }
@@ -955,7 +1052,6 @@ void CommonReduce2Loops(OpKernelContext* ctx,
     }
     return;
   }
-
   ResultsNoTransposePrepareForReduce last_results;
   NoTransposeReduce2Loops<AGG>(output, fast_shape, *input, fast_axes, ctx->GetOperatorThreadPool(), last_results);
 }
@@ -1021,7 +1117,6 @@ template <typename T>
 std::unique_ptr<Tensor> ReduceSum<T>::Impl(const Tensor& input, gsl::span<const int64_t> reduce_axes,
                                            AllocatorPtr allocator, concurrency::ThreadPool* tp, bool keep_dims,
                                            const TensorShape* input_shape_override) {
-  TensorShapeVector axes;
   TensorShapeVector output_shape, fast_shape, fast_axes;
   TensorShape new_input_shape = input_shape_override == nullptr ? input.Shape() : *input_shape_override;
   auto reduced_dims = new_input_shape.GetDims();

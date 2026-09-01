@@ -1,15 +1,10 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/providers/common.h"
-#include "core/providers/shared/utils/utils.h"
-#include "core/framework/tensorprotoutils.h"
+#include "core/providers/qnn/builder/opbuilder/base_op_builder.h"
+#include "core/providers/qnn/builder/qnn_utils.h"
 #include "core/providers/qnn/builder/qnn_model_wrapper.h"
 #include "core/providers/qnn/builder/op_builder_factory.h"
-#include "core/common/safeint.h"
-#include "onnx/defs/data_type_utils.h"
-
-#include "base_op_builder.h"
 
 namespace onnxruntime {
 namespace qnn {
@@ -29,6 +24,11 @@ class InstanceNormOpBuilder : public BaseOpBuilder {
                        const logging::Logger& logger,
                        std::vector<std::string>& input_names,
                        bool do_op_validation) const override ORT_MUST_USE_RESULT;
+
+  Status ProcessScale(QnnModelWrapper& qnn_model_wrapper,
+                      const NodeUnitIODef& input,
+                      const logging::Logger& logger,
+                      std::vector<std::string>& input_names) const;
 
   Status ProcessAttributesAndOutputs(QnnModelWrapper& qnn_model_wrapper,
                                      const NodeUnit& node_unit,
@@ -103,7 +103,7 @@ Status InstanceNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
       input0_info.shape.size() == 3 && input0_info.shape[0] != 1) {
     const std::string& orig_input0_name = inputs[0].node_arg.Name();
     const std::string op_input0_name = input0_info.is_initializer ? orig_input0_name
-                                                                  : orig_input0_name + "_ort_qnn_ep_reshape";
+                                                                  : utils::GetUniqueName(orig_input0_name, "_reshape");
     input_names.push_back(op_input0_name);
 
     std::vector<uint8_t> initializer_data;
@@ -119,6 +119,9 @@ Status InstanceNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
     };
 
     if (!input0_info.is_initializer) {
+      ORT_RETURN_IF(input0_info.quant_param.IsPerChannel(),
+                    "Non-constant InstanceNormalization inputs only support per-tensor quantization");
+
       // Add Reshape node to transform 1D input to 2D (i.e., set height to 1).
       // We don't need to do this for initializers, because the element layout does not change. We can just
       // modify the shape dimensions.
@@ -131,18 +134,59 @@ Status InstanceNormOpBuilder::ProcessInputs(QnnModelWrapper& qnn_model_wrapper,
                                                            input0_info.quant_param,
                                                            do_op_validation,
                                                            is_graph_input));
+    } else if (input0_info.quant_param.IsPerChannel()) {
+      // The reshape (unsqueeze) may require us to shift the quant parameter's axis.
+      ORT_RETURN_IF_ERROR(input0_info.quant_param.HandleUnsqueeze<uint32_t>(input0_info.shape, op_shape));
     }
 
-    Qnn_TensorType_t tensor_type = GetInputTensorType(qnn_model_wrapper, op_input0_name);
-    QnnTensorWrapper input_tensorwrapper(op_input0_name, tensor_type, input0_info.qnn_data_type, input0_info.quant_param,
-                                         std::move(op_shape), std::move(initializer_data));
+    Qnn_TensorType_t tensor_type = qnn_model_wrapper.GetTensorType(op_input0_name);
+    QnnTensorWrapper input_tensorwrapper(op_input0_name, tensor_type, input0_info.qnn_data_type,
+                                         std::move(input0_info.quant_param), std::move(op_shape),
+                                         std::move(initializer_data));
     ORT_RETURN_IF_NOT(qnn_model_wrapper.AddTensorWrapper(std::move(input_tensorwrapper)), "Failed to add tensor.");
   } else {
     ORT_RETURN_IF_ERROR(ProcessInput(qnn_model_wrapper, inputs[0], logger, input_names));  // Input 0
   }
 
-  ORT_RETURN_IF_ERROR(ProcessInput(qnn_model_wrapper, inputs[1], logger, input_names));  // Scale
+  ORT_RETURN_IF_ERROR(ProcessScale(qnn_model_wrapper, inputs[1], logger, input_names));  // Scale
   ORT_RETURN_IF_ERROR(ProcessInput(qnn_model_wrapper, inputs[2], logger, input_names));  // Bias
+
+  return Status::OK();
+}
+
+Status InstanceNormOpBuilder::ProcessScale(QnnModelWrapper& qnn_model_wrapper,
+                                           const NodeUnitIODef& input,
+                                           const logging::Logger& logger,
+                                           std::vector<std::string>& input_names) const {
+  ORT_RETURN_IF_ERROR(ProcessInput(qnn_model_wrapper, input, logger, input_names));
+
+  // Turn SFIXED scale of InstanceNorm into UFIXED when it is constant
+  const auto& input_name = input.node_arg.Name();
+  bool is_const = qnn_model_wrapper.IsConstantInput(input_name);
+  bool is_npu = IsNpuBackend(qnn_model_wrapper.GetQnnBackendType());
+  if (is_npu && is_const) {
+    TensorInfo tensor_info = {};
+    ORT_RETURN_IF_ERROR(qnn_model_wrapper.GetTensorInfo(input, tensor_info));
+    const Qnn_QuantizeParams_t& quant_param = tensor_info.quant_param.Get();
+    if (tensor_info.qnn_data_type == QNN_DATATYPE_SFIXED_POINT_8) {
+      std::string convert_input_name = input_names.back();
+      std::string convert_output_name = utils::GetUniqueName(convert_input_name, "_convert_s8_to_u8");
+      Status status = utils::InsertConvertOp(
+          qnn_model_wrapper,
+          convert_input_name,
+          convert_output_name,
+          QNN_DATATYPE_SFIXED_POINT_8,
+          QNN_DATATYPE_UFIXED_POINT_8,
+          quant_param.scaleOffsetEncoding.offset,
+          quant_param.scaleOffsetEncoding.scale,
+          tensor_info.shape,
+          false,  // asymmetric
+          false   // do_op_validation
+      );
+      input_names.pop_back();
+      input_names.push_back(convert_output_name);
+    }
+  }
 
   return Status::OK();
 }
@@ -187,7 +231,7 @@ Status InstanceNormOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_m
   //
 
   const std::string& orig_output_name = outputs[0].node_arg.Name();
-  std::string op_output_name = orig_output_name + "_ort_qnn_ep_reshape";
+  std::string op_output_name = utils::GetUniqueName(orig_output_name, "_reshape");
 
   std::vector<uint32_t> op_output_shape = {
       output_info.shape[0],  // N
@@ -197,9 +241,9 @@ Status InstanceNormOpBuilder::ProcessAttributesAndOutputs(QnnModelWrapper& qnn_m
   };
 
   QnnTensorWrapper output_tensorwrapper(op_output_name, QNN_TENSOR_TYPE_NATIVE, output_info.qnn_data_type,
-                                        output_info.quant_param, std::vector<uint32_t>(op_output_shape));
+                                        output_info.quant_param.Copy(), std::vector<uint32_t>(op_output_shape));
   ORT_RETURN_IF_NOT(qnn_model_wrapper.AddTensorWrapper(std::move(output_tensorwrapper)), "Failed to add tensor.");
-  ORT_RETURN_IF_NOT(qnn_model_wrapper.CreateQnnNode(GetNodeName(node_unit),
+  ORT_RETURN_IF_NOT(qnn_model_wrapper.CreateQnnNode(utils::GetUniqueName(node_unit),
                                                     QNN_OP_PACKAGE_NAME_QTI_AISW,
                                                     GetQnnOpType(node_unit.OpType()),
                                                     std::move(input_names),

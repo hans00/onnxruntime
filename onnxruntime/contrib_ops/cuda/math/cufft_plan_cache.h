@@ -33,10 +33,10 @@ struct CufftPlanInfo {
 // see https://en.wikipedia.org/wiki/Fowler%E2%80%93Noll%E2%80%93Vo_hash_function
 template <typename T>
 struct ParamsHash {
-  // Params must be a POD because we read out its memory
-  // contenst as char* when hashing
+  // Params must be a trivial type because we read out its memory
+  // contents as char* when hashing
 
-  static_assert(std::is_pod<T>::value, "Params is not POD");
+  static_assert(std::is_trivial<T>::value, "Params is not a trivial type");
   size_t operator()(const T& params) const {
     auto ptr = reinterpret_cast<const uint8_t*>(&params);
     uint32_t value = 0x811C9DC5;
@@ -50,10 +50,10 @@ struct ParamsHash {
 
 template <typename T>
 struct ParamsEqual {
-  // Params must be a POD because we read out its memory
-  // contenst as char* when comparing
+  // Params must be a trivial type because we read out its memory
+  // contents as char* when comparing
 
-  static_assert(std::is_pod<T>::value, "Params is not POD");
+  static_assert(std::is_trivial<T>::value, "Params is not a trivial type");
 
   bool operator()(const T& a, const T& b) const {
     auto ptr1 = reinterpret_cast<const uint8_t*>(&a);
@@ -64,6 +64,9 @@ struct ParamsEqual {
 
 class CuFFTPlanCache {
  public:
+  ~CuFFTPlanCache() {
+    Clear();
+  }
   CufftPlanInfo TryEmplaceValue(FFTState& key) {
     std::lock_guard<std::mutex> lock(mutex);
 
@@ -80,6 +83,18 @@ class CuFFTPlanCache {
   int64_t GetCacheSize() { return map.size(); }
 
   std::mutex mutex;
+
+  void Clear() {
+    std::lock_guard<std::mutex> lk(mutex);
+    for (auto& kv : map) {
+      auto& info = kv.second;
+      if (info.plan != 0) {
+        cufftDestroy(info.plan);
+        info.plan = 0;
+      }
+    }
+    map.clear();
+  }
 
  private:
   CufftPlanInfo CreatePlanInfo(FFTState& key) {

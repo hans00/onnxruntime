@@ -50,10 +50,10 @@ common::Status DataSet::AddData(const vector<ONNX_NAMESPACE::TensorProto>& featu
     size_t cpu_tensor_length;
     ORT_RETURN_IF_ERROR(utils::GetSizeInBytesFromTensorProto<0>(tensor_proto, &cpu_tensor_length));
     OrtValue ort_value;
-    OrtMemoryInfo info("Cpu", OrtDeviceAllocator, OrtDevice{}, 0, OrtMemTypeDefault);
+    OrtMemoryInfo info("Cpu", OrtDeviceAllocator, OrtDevice{}, OrtMemTypeDefault);
     std::unique_ptr<char[]> buffer = std::make_unique<char[]>(cpu_tensor_length);
     ORT_RETURN_IF_ERROR(utils::TensorProtoToOrtValue(
-        Env::Default(), nullptr, tensor_proto, MemBuffer(buffer.get(), cpu_tensor_length, info), ort_value));
+        Env::Default(), std::filesystem::path(), tensor_proto, MemBuffer(buffer.get(), cpu_tensor_length, info), ort_value));
 
     sample->push_back(ort_value);
     ortvalue_buffers_.emplace_back(std::move(buffer));

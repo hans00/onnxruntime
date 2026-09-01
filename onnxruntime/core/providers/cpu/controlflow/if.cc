@@ -104,12 +104,54 @@ ONNX_CPU_OPERATOR_VERSIONED_KERNEL(If,
                                    If);
 
 // float 8 support was added.
-ONNX_CPU_OPERATOR_KERNEL(If,
-                         19,
-                         KernelDefBuilder()
-                             .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
-                             .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
-                         If);
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(
+    If,
+    19,
+    20,
+    KernelDefBuilder()
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+        .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
+    If);
+
+// uint4 and int4 support was added.
+// TODO(adrianlizarraga): Implement int4 and uint4 support.
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(
+    If,
+    21,
+    22,
+    KernelDefBuilder()
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+        .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
+    If);
+
+// Opset 23 added support for float4e2m1.
+// TODO: Add support for float4e2m1.
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(
+    If,
+    23,
+    23,
+    KernelDefBuilder()
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+        .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
+    If);
+
+ONNX_CPU_OPERATOR_VERSIONED_KERNEL(
+    If,
+    24,
+    24,
+    KernelDefBuilder()
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+        .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
+    If);
+
+// Opset 25
+ONNX_CPU_OPERATOR_KERNEL(
+    If,
+    25,
+    KernelDefBuilder()
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+        .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorAndOptionalTypesIRv9()),
+    If);
 
 If::Info::Info(const onnxruntime::Node& node, const GraphViewer& subgraph_in) : subgraph(subgraph_in) {
   num_implicit_inputs = static_cast<int>(node.ImplicitInputDefs().size());
@@ -426,7 +468,9 @@ Status IfImpl::Execute(const FeedsFetchesManager& ffm) {
 
   status = utils::ExecuteSubgraph(session_state_, ffm, feeds, fetches, fetch_allocators,
                                   ExecutionMode::ORT_SEQUENTIAL, context_.GetTerminateFlag(),
-                                  context_.Logger(), context_.GetComputeStream());
+                                  context_.Logger(), context_.GetComputeStream(),
+                                  /*sync_subgraph_fetches*/ false,
+                                  context_.GetRunProfiler());
 
   ORT_RETURN_IF_ERROR(status);
 

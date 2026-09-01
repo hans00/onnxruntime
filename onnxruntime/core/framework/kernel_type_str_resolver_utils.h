@@ -5,11 +5,9 @@
 
 #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/common/status.h"
 #include "core/framework/kernel_type_str_resolver.h"
-#include "core/graph/op_identifier.h"
-
 namespace flatbuffers {
 class DetachedBuffer;
 }
@@ -17,11 +15,6 @@ class DetachedBuffer;
 namespace onnxruntime::kernel_type_str_resolver_utils {
 
 #if !defined(ORT_MINIMAL_BUILD)
-
-/**
- * Gets the ops that the layout transformation may potentially add.
- */
-gsl::span<const OpIdentifierWithStringViews> GetLayoutTransformationRequiredOpIdentifiers();
 
 /**
  * Saves `kernel_type_str_resolver` to a byte buffer owned by `buffer` and referenced by `buffer_span`.

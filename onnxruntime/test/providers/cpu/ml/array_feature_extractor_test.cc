@@ -5,7 +5,7 @@
 
 #include "gtest/gtest.h"
 #include "test/providers/provider_test_utils.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 using namespace std;
 namespace onnxruntime {
 namespace test {
@@ -106,6 +106,14 @@ TEST_F(ArrayFeatureExtractorTest, InvalidInputOutOfBoundsY) {
   test_.AddInput<int32_t>("X", {2, 2}, {1, 2, 3, 4});
   test_.AddInput<int64_t>("Y", {1}, {10});
   test_.AddOutput<int32_t>("Z", {0}, {});
+  test_.Run(OpTester::ExpectResult::kExpectFailure);
+}
+
+TEST_F(ArrayFeatureExtractorTest, InvalidInputNegativeY) {
+  test_.AddInput<int64_t>("X", {10, 1}, {0, 1, 2, 3, 4, 5, 6, 7, 8, 9});
+  test_.AddInput<int64_t>("Y", {1}, {-10});
+  // Should fail due to negative index -10
+  test_.AddOutput<int64_t>("Z", {0}, {});
   test_.Run(OpTester::ExpectResult::kExpectFailure);
 }
 

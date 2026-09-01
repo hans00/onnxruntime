@@ -10,7 +10,6 @@
 
 #include "core/common/common.h"
 #include "core/common/logging/logging.h"
-#include "core/common/path.h"
 #include "core/framework/data_transfer_utils.h"
 #include "core/framework/endian_utils.h"
 #include "core/framework/ort_value.h"
@@ -79,16 +78,27 @@ Status SaveRuntimeTensor(
 
   saved_tensor_proto.set_data_location(ONNX_NAMESPACE::TensorProto_DataLocation_EXTERNAL);
 
-  // TODO need to ensure the data is written in little-endian format...
-  // e.g., with endian_utils.h:WriteLittleEndian()
-  // https://github.com/microsoft/onnxruntime/blob/main/onnxruntime/core/framework/endian_utils.h
   if constexpr (endian::native != endian::little) {
-    ORT_NOT_IMPLEMENTED("checkpointing currently requires little-endian host byte order");
-  }
+    std::vector<char> le_data;
+    le_data.resize(length);
 
-  ORT_RETURN_IF_NOT(
-      data_file.write(tensor_data.data(), length),
-      "Failed to write to data file: ", ToUTF8String(relative_data_path));
+    size_t element_size = onnxruntime::utils::GetElementSizeOfTensor(static_cast<ONNX_NAMESPACE::TensorProto_DataType>(saved_tensor_proto.data_type()));
+    auto src_span = gsl::make_span(reinterpret_cast<const unsigned char*>(tensor_data.data()), tensor_data.size_bytes());
+    auto dst_span = gsl::make_span(reinterpret_cast<unsigned char*>(le_data.data()), le_data.size());
+
+    // If element size is unknown, set it to 1 to disable byteswapping
+    if (element_size < 1) element_size = 1;
+
+    ORT_RETURN_IF_ERROR(onnxruntime::utils::WriteLittleEndian(element_size, src_span, dst_span));
+
+    ORT_RETURN_IF_NOT(
+        data_file.write(le_data.data(), length),
+        "Failed to write to data file: ", ToUTF8String(relative_data_path));
+  } else {
+    ORT_RETURN_IF_NOT(
+        data_file.write(tensor_data.data(), length),
+        "Failed to write to data file: ", ToUTF8String(relative_data_path));
+  }
 
   tensor_proto = std::move(saved_tensor_proto);
   return Status::OK();
@@ -260,13 +270,10 @@ Status LoadModelCheckpoint(
     ORT_RETURN_IF_ERROR(Env::Default().GetCanonicalPath(
         checkpoint_path, checkpoint_canonical_path));
 
-    Path relative_tensors_data_path_obj{};
-    ORT_RETURN_IF_ERROR(RelativePath(
-        Path::Parse(model_directory_canonical_path),
-        Path::Parse(GetCheckpointTensorsDataFilePath(checkpoint_canonical_path)),
-        relative_tensors_data_path_obj));
+    std::filesystem::path relative_tensors_data_path_obj = std::filesystem::relative(
+        GetCheckpointTensorsDataFilePath(checkpoint_canonical_path), model_directory_canonical_path);
     ORT_RETURN_IF_ERROR(UpdateTensorsExternalDataLocations(
-        relative_tensors_data_path_obj.ToPathString(), loaded_tensor_protos));
+        relative_tensors_data_path_obj.native(), loaded_tensor_protos));
   }
 
   // read properties file

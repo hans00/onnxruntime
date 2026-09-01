@@ -38,6 +38,8 @@ ncclDataType_t GetNcclDataType(onnxruntime::MLDataType type) {
     return ncclInt64;
   } else if (type == DataTypeImpl::GetType<MLFloat16>()) {
     return ncclFloat16;
+  } else if (type == DataTypeImpl::GetType<BFloat16>()) {
+    return ncclBfloat16;
   } else if (type == DataTypeImpl::GetType<float>()) {
     return ncclFloat32;
   } else if (type == DataTypeImpl::GetType<double>()) {
@@ -251,18 +253,21 @@ AllReduce::AllReduce(const OpKernelInfo& info) : NcclKernel(info) {
 }
 
 Status AllReduce::ComputeInternal(OpKernelContext* context) const {
-  ncclComm_t comm = nccl_->Comm();
-
   auto input_tensor = context->Input<Tensor>(0);
   const void* input_data = input_tensor->DataRaw();
+
   const auto in_shape = input_tensor->Shape();
   int64_t input_count = in_shape.Size();
 
   void* output_data = context->Output(0, in_shape)->MutableDataRaw();
 
-  ncclDataType_t dtype = GetNcclDataType(input_tensor->DataType());
-  NCCL_RETURN_IF_ERROR(ncclAllReduce(input_data, output_data, input_count, dtype, ncclSum, comm, Stream(context)));
-  return Status::OK();
+  return FuncCustomAllReduce(nccl_,
+                             Stream(context),
+                             input_data,
+                             output_data,
+                             input_count,
+                             input_tensor->DataType(),
+                             onnxruntime::cuda::collective::IPCMemoryResourcePack::GetGlobalInstance());
 }
 
 AllGather::AllGather(const OpKernelInfo& info) : NcclKernel(info) {
@@ -379,7 +384,10 @@ ONNX_OPERATOR_KERNEL_EX(
     (*KernelDefBuilder::Create())
         .VariadicAlias(0, 0)  // outputs and inputs are mapped one to one
         .AllocateInputsContiguously()
-        .TypeConstraint("T", DataTypeImpl::AllIEEEFloatTensorTypes()),
+        .TypeConstraint("T", {DataTypeImpl::GetTensorType<float>(),
+                              DataTypeImpl::GetTensorType<double>(),
+                              DataTypeImpl::GetTensorType<MLFloat16>(),
+                              DataTypeImpl::GetTensorType<BFloat16>()}),
     AllReduce);
 
 ONNX_OPERATOR_KERNEL_EX(
@@ -415,6 +423,56 @@ Status FuncAllReduce(
 
   ncclDataType_t dtype = GetNcclDataType(input->DataType());
   NCCL_RETURN_IF_ERROR(ncclAllReduce(input_data, output_data, input_count, dtype, ncclSum, comm, stream));
+  return Status::OK();
+}
+
+Status FuncCustomAllReduce(
+    NcclContext* nccl,
+    cudaStream_t stream,
+    const void* input_data,
+    void* output_data,
+    int64_t input_count,
+    onnxruntime::MLDataType data_type,
+    onnxruntime::cuda::collective::IPCMemoryResourcePack& ipc_mem_res_pack) {
+  int rank = nccl->Rank();
+  int world_size = nccl->Size();
+
+  onnxruntime::cuda::collective::AllReduceStrategyType runtime_strategy =
+      onnxruntime::cuda::collective::SelectImplementation(input_count, rank, world_size, data_type);
+
+  if (runtime_strategy == onnxruntime::cuda::collective::AllReduceStrategyType::NCCL) {
+    ncclDataType_t dtype = GetNcclDataType(data_type);
+    NCCL_RETURN_IF_ERROR(ncclAllReduce(input_data, output_data, input_count, dtype, ncclSum, nccl->Comm(), stream));
+
+    return Status::OK();
+  }
+
+  onnxruntime::cuda::collective::AllReduceStrategyConfig m_config =
+      onnxruntime::cuda::collective::AllReduceStrategyConfig::USE_MEMCPY;
+
+  static std::mutex s_mutex;
+  std::unique_lock<std::mutex> lock(s_mutex);
+  ORT_RETURN_IF_ERROR(onnxruntime::cuda::collective::GetCustomAllReduceWorkspace(rank,
+                                                                                 world_size,
+                                                                                 input_count * data_type->Size(),
+                                                                                 ipc_mem_res_pack));
+
+  onnxruntime::cuda::collective::AllReduceParams params = onnxruntime::cuda::collective::AllReduceParams::deserialize(
+      reinterpret_cast<const int32_t*>(ipc_mem_res_pack.m_comm_ptrs.data()),
+      world_size,
+      rank,
+      ++ipc_mem_res_pack.counter);
+  lock.unlock();
+
+  CUDA_RETURN_IF_ERROR(cudaGetLastError());
+
+  params.local_output_buffer_ptr = output_data;
+  params.local_input_buffer_ptr = input_data;
+  params.elts_total = input_count;
+
+  onnxruntime::cuda::collective::CustomAllReduce(params, data_type, runtime_strategy, m_config, stream);
+  CUDA_RETURN_IF_ERROR(cudaGetLastError());
+
   return Status::OK();
 }
 

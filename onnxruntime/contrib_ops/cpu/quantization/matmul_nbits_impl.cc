@@ -9,7 +9,7 @@
 #include <type_traits>
 
 #include "core/common/common.h"
-#include "core/framework/float16.h"
+#include "core/common/float16.h"
 #include "core/providers/common.h"
 #include "core/platform/threadpool.h"
 
@@ -40,6 +40,13 @@ void Dequantize4BitsKernelReOrder(
   }
   T* output_i = output + out_y * out_cols + out_x;
   uint32_t quant_value = *(reinterpret_cast<const uint32_t*>(quant_data + element_offset / 2));
+  if constexpr (onnxruntime::endian::native == onnxruntime::endian::big) {
+    const uint8_t* c = reinterpret_cast<const uint8_t*>(&quant_value);
+    quant_value = static_cast<uint32_t>(c[0]) |
+                  static_cast<uint32_t>(c[1]) << 8 |
+                  static_cast<uint32_t>(c[2]) << 16 |
+                  static_cast<uint32_t>(c[3]) << 24;
+  }
   const int remain_x = std::min(8, out_cols - out_x);
   const int32_t* reorder_idx_with_off = reorder_idx + kb_idx * block_size + ((threadIdx_x * 8) & (block_size - 1));
   for (int i = 0; i < remain_x; i++) {
@@ -47,12 +54,12 @@ void Dequantize4BitsKernelReOrder(
     T scale = *(scale_data + n_idx * scales_shape_x + rid);
     float zp_f = 8;
     if (zero_points) {
-      if constexpr (std::is_same_v<zeroT, T>) {
-        zp_f = *(zero_points + n_idx * scales_shape_x + rid);
-      } else {
+      if constexpr (std::is_same_v<zeroT, uint8_t>) {
         uint8_t zp = 8;
         zp = zero_points[n_idx * zero_point_shape_x + rid / 2];
         zp = (rid & 0x01) ? (zp >> 4) : (zp & 0x0f);
+      } else {
+        zp_f = *(zero_points + static_cast<uint64_t>(n_idx) * static_cast<uint64_t>(scales_shape_x) + static_cast<uint64_t>(rid));
       }
     }
 
@@ -66,7 +73,7 @@ void Dequantize4BitsKernelReOrder(
   }
 }
 
-template <typename inputT, typename zeroT>
+template <typename inputT, typename zeroT, int qbits>
 void DequantizeBlockwise(
     inputT* output,              // dequantized output
     const uint8_t* quant_data,   // quantized input
@@ -95,14 +102,19 @@ void DequantizeBlockwise(
       });
 }
 
-template void DequantizeBlockwise<float, uint8_t>(
+template void DequantizeBlockwise<float, uint8_t, 4>(
     float* output, const uint8_t* quant_data, const float* scales_data,
     const uint8_t* zero_points, const int32_t* reorder_idx, int32_t block_size,
     bool columnwise, int32_t K, int32_t N, onnxruntime::concurrency::ThreadPool* thread_pool);
 
-template void DequantizeBlockwise<float, float>(
+template void DequantizeBlockwise<float, float, 4>(
     float* output, const uint8_t* quant_data, const float* scales_data,
     const float* zero_points, const int32_t* reorder_idx, int32_t block_size,
+    bool columnwise, int32_t K, int32_t N, onnxruntime::concurrency::ThreadPool* thread_pool);
+
+template void DequantizeBlockwise<float, MLFloat16, 4>(
+    float* output, const uint8_t* quant_data, const float* scales_data,
+    const MLFloat16* zero_points, const int32_t* reorder_idx, int32_t block_size,
     bool columnwise, int32_t K, int32_t N, onnxruntime::concurrency::ThreadPool* thread_pool);
 
 }  // namespace contrib

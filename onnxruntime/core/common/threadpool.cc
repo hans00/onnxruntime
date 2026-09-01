@@ -21,9 +21,10 @@ limitations under the License.
 #include "core/common/cpuid_info.h"
 #include "core/common/eigen_common_wrapper.h"
 #include "core/platform/EigenNonBlockingThreadPool.h"
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 #if !defined(ORT_MINIMAL_BUILD)
 #ifdef _WIN32
+#include <Windows.h>
 #include "processthreadsapi.h"
 #include <codecvt>
 #include <locale>
@@ -373,8 +374,9 @@ ThreadPool::ThreadPool(Env* env,
                        const ThreadOptions& thread_options,
                        const NAME_CHAR_TYPE* name,
                        int degree_of_parallelism,
-                       bool low_latency_hint,
-                       bool force_hybrid)
+                       int spin_duration_us,
+                       bool force_hybrid,
+                       unsigned int spin_backoff_max)
     : thread_options_(thread_options), force_hybrid_(force_hybrid) {
   // In the current implementation, a thread pool with degree_of_parallelism==1 uses
   // the caller as one of the threads for executing work.  Hence we only create
@@ -389,12 +391,16 @@ ThreadPool::ThreadPool(Env* env,
       assert(thread_options_.affinities.size() >= size_t(threads_to_create));
     }
 
+#ifdef ORT_ENABLE_SESSION_THREADPOOL_CALLBACKS
+    using PoolType = ThreadPoolTempl<Env, WorkWithCallbackPolicy>;
+#else
+    using PoolType = ThreadPoolTempl<Env, WorkNoCallbackPolicy>;
+#endif
     extended_eigen_threadpool_ =
-        std::make_unique<ThreadPoolTempl<Env> >(name,
-                                                threads_to_create,
-                                                low_latency_hint,
-                                                *env,
-                                                thread_options_);
+        std::make_unique<PoolType>(name, threads_to_create,
+                                   spin_duration_us,
+                                   spin_backoff_max,
+                                   *env, thread_options_);
     underlying_threadpool_ = extended_eigen_threadpool_.get();
   }
 }
@@ -636,7 +642,7 @@ bool ThreadPool::ShouldParallelize(const concurrency::ThreadPool* tp) {
 }
 
 int ThreadPool::DegreeOfParallelism(const concurrency::ThreadPool* tp) {
-  // When not using OpenMP, we parallelise over the N threads created by the pool
+  // When not using OpenMP, we parallelize over the N threads created by the pool
   // tp, plus 1 for the thread entering a loop.
   if (tp) {
     if (tp->force_hybrid_ || CPUIDInfo::GetCPUIDInfo().IsHybrid()) {

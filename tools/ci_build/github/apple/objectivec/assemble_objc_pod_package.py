@@ -13,10 +13,10 @@ sys.path.append(str(_script_dir.parent))
 
 from c.assemble_c_pod_package import get_pod_config_file as get_c_pod_config_file  # noqa: E402
 from package_assembly_utils import (  # noqa: E402
-    PackageVariant,
     copy_repo_relative_to_dir,
     filter_files,
     gen_file_from_template,
+    get_podspec_values,
     load_json_config,
 )
 
@@ -83,52 +83,39 @@ training_only_objc_files = {
 }
 
 
-def get_pod_files(package_variant: PackageVariant):
+def get_pod_files():
     """
-    Gets the source and header files for the given package variant.
+    Gets the source and header files.
     """
-    if package_variant == PackageVariant.Training:
-        return all_objc_files
-    else:
-        # return files that are in pod_files but not in training_only_objc_files
-        filtered_pod_files = {}
-        for key in all_objc_files:
-            filtered_pod_files[key] = filter_files(all_objc_files[key], training_only_objc_files[key])
-        return filtered_pod_files
+    # return files that are in pod_files but not in training_only_objc_files
+    filtered_pod_files = {}
+    for key, value in all_objc_files.items():
+        filtered_pod_files[key] = filter_files(value, training_only_objc_files[key])
+    return filtered_pod_files
 
 
-def get_pod_config_file(package_variant: PackageVariant):
+def get_pod_config_file():
     """
-    Gets the pod configuration file path for the given package variant.
+    Gets the pod configuration file path.
     """
-    if package_variant == PackageVariant.Full:
-        return _script_dir / "onnxruntime-objc.config.json"
-    elif package_variant == PackageVariant.Mobile:
-        return _script_dir / "onnxruntime-mobile-objc.config.json"
-    elif package_variant == PackageVariant.Training:
-        return _script_dir / "onnxruntime-training-objc.config.json"
-    else:
-        raise ValueError(f"Unhandled package variant: {package_variant}")
+    return _script_dir / "onnxruntime-objc.config.json"
 
 
-def assemble_objc_pod_package(
-    staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path, package_variant: PackageVariant
-):
+def assemble_objc_pod_package(staging_dir: pathlib.Path, pod_version: str, framework_info_file: pathlib.Path):
     """
     Assembles the files for the Objective-C pod package in a staging directory.
 
     :param staging_dir Path to the staging directory for the Objective-C pod files.
     :param pod_version Objective-C pod version.
     :param framework_info_file Path to the framework_info.json or xcframework_info.json file containing additional values for the podspec.
-    :param package_variant The pod package variant.
     :return Tuple of (package name, path to the podspec file).
     """
     staging_dir = staging_dir.resolve()
     framework_info_file = framework_info_file.resolve(strict=True)
 
     framework_info = load_json_config(framework_info_file)
-    pod_config = load_json_config(get_pod_config_file(package_variant))
-    c_pod_config = load_json_config(get_c_pod_config_file(package_variant))
+    pod_config = load_json_config(get_pod_config_file())
+    c_pod_config = load_json_config(get_c_pod_config_file())
 
     pod_name = pod_config["name"]
 
@@ -136,7 +123,7 @@ def assemble_objc_pod_package(
     if staging_dir.exists():
         print("Warning: staging directory already exists", file=sys.stderr)
 
-    pod_files = get_pod_files(package_variant)
+    pod_files = get_pod_files()
 
     # copy the necessary files to the staging directory
     copy_repo_relative_to_dir(
@@ -149,12 +136,14 @@ def assemble_objc_pod_package(
     def path_patterns_as_variable_value(patterns: list[str]):
         return ", ".join([f'"{pattern}"' for pattern in patterns])
 
+    (ios_deployment_target, macos_deployment_target, _) = get_podspec_values(framework_info)
+
     variable_substitutions = {
         "C_POD_NAME": c_pod_config["name"],
         "DESCRIPTION": pod_config["description"],
         "INCLUDE_DIR_LIST": path_patterns_as_variable_value(include_dirs),
-        "IOS_DEPLOYMENT_TARGET": framework_info["iphonesimulator"]["APPLE_DEPLOYMENT_TARGET"],
-        "MACOSX_DEPLOYMENT_TARGET": framework_info.get("macosx", {}).get("APPLE_DEPLOYMENT_TARGET", ""),
+        "IOS_DEPLOYMENT_TARGET": ios_deployment_target,
+        "MACOSX_DEPLOYMENT_TARGET": macos_deployment_target,
         "LICENSE_FILE": license_file,
         "NAME": pod_name,
         "PUBLIC_HEADER_FILE_LIST": path_patterns_as_variable_value(pod_files["public_header_files"]),
@@ -184,7 +173,7 @@ def parse_args():
     parser.add_argument(
         "--staging-dir",
         type=pathlib.Path,
-        default=pathlib.Path("./onnxruntime-mobile-objc-staging"),
+        default=pathlib.Path("./objc-staging"),
         help="Path to the staging directory for the Objective-C pod files.",
     )
     parser.add_argument("--pod-version", required=True, help="Objective-C pod version.")
@@ -194,9 +183,6 @@ def parse_args():
         required=True,
         help="Path to the framework_info.json or xcframework_info.json file containing additional values for the podspec. "
         "This file should be generated by CMake in the build directory.",
-    )
-    parser.add_argument(
-        "--variant", choices=PackageVariant.release_variant_names(), required=True, help="Pod package variant."
     )
 
     return parser.parse_args()
@@ -209,7 +195,6 @@ def main():
         staging_dir=args.staging_dir,
         pod_version=args.pod_version,
         framework_info_file=args.framework_info_file,
-        package_variant=PackageVariant[args.variant],
     )
 
     return 0

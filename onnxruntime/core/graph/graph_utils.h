@@ -8,6 +8,10 @@
 #include "core/graph/onnx_protobuf.h"
 #include "core/graph/graph.h"
 
+#include <limits>
+#include <string>
+#include <vector>
+
 namespace onnxruntime {
 namespace graph_utils {
 
@@ -28,12 +32,81 @@ bool IsSupportedOptypeVersionAndDomain(const Node& node,
 /** Returns the attribute of a Node with a given name. */
 const ONNX_NAMESPACE::AttributeProto* GetNodeAttribute(const Node& node, const std::string& attr_name);
 
+/** Checks whether a Shape node returns the full tensor shape (all dimensions).
+ * Returns false if start/end attributes restrict the output to a subset of dimensions. */
+bool IsFullShapeNode(const Node& node);
+
 /** Add a new initializer to 'graph'.
 Checks that new_initializer does not already exist in 'graph' before adding it.
 @returns The NodeArg for the new initializer.
 @remarks No matching graph input is created, so the initializer will be constant.
 */
 NodeArg& AddInitializer(Graph& graph, const ONNX_NAMESPACE::TensorProto& new_initializer);
+
+/// <summary>
+/// Adds a new initializer to 'graph' with new_initializer that points to the OrtValue buffer
+/// </summary>
+/// <param name="graph">target graph</param>
+/// <param name="new_initializer">TensorProto with external data contained in ort_value</param>
+/// <param name="ort_value">ort_value with data</param>
+/// <returns></returns>
+NodeArg& AddInitializerWithOrtValue(Graph& graph, const ONNX_NAMESPACE::TensorProto& new_initializer,
+                                    OrtValue ort_value);
+
+/** Add a new initializer to 'graph'.
+ * Checks that new_initializer does not already exist in 'graph' before adding it.
+ * @param new_initializer tensor proto that has external data pointing to data within the tensor.
+ * @param tensor with data
+ * @returns The NodeArg for the new initializer.
+ * @remarks No matching graph input is created, so the initializer will be constant.
+ */
+NodeArg& AddInitializerWithOrtValue(Graph& graph, const ONNX_NAMESPACE::TensorProto& new_initializer, Tensor&& tensor);
+
+/** Add a new initializer to 'graph'.
+ * The function unpacks data into a tensor and converts new_initializer to a TensorProto with external data in memory.
+ * The initializer is then added to the graph and tensor is wrapped into OrtValue and added to
+ * Graph::ortvalue_initializers_;
+ *
+ * @param graph The graph to which the initializer will be added.
+ * @param new_initializer tensor proto that actually has data in it
+ * @returns The NodeArg for the new initializer.
+ *  @remarks No matching graph input is created, so the initializer will be constant.
+ */
+NodeArg& AddInitializerWithOrtValue(Graph& graph, const ONNX_NAMESPACE::TensorProto& new_initializer);
+
+/// <summary>
+/// If the initializer with the given name does not exist in the destination graph, but exists in the
+/// source graph, copy it to the destination graph.
+/// </summary>
+/// <param name="src_graph">source graph s</param>
+/// <param name="dst_graph">destination</param>
+/// <param name="name">initializers name</param>
+/// <param name="copy_in_memory_data ">if external data is in memory, copy data inline.
+///  default is false. This is to accomodate EPs who load initializers on their own and do not understand
+///          our /*/_ORT_MEM_ADDR_/*/ external data reference</param>
+void MakeInitializerCopyIfNotExist(const Graph& src_graph, Graph& dst_graph, const std::string& name,
+                                   bool copy_in_memory_data = false);
+
+/// <summary>
+/// If the constant initializer with the given name does not exist in the destination graph, but exists in the
+/// source graph, copy it to the destination graph along with its OrtValue if present.
+/// </summary>
+/// <param name="src_graph"></param>
+/// <param name="dst_graph"></param>
+/// <param name="name"></param>
+/// <param name="check_outer_scope">checks outerscope if true</param>
+void MakeConstantInitializerCopyIfNotExist(const Graph& src_graph, Graph& dst_graph,
+                                           const std::string& name, bool check_outer_scope);
+
+/// <summary>
+/// If the initializer is present with the graph and has external data in memory,
+/// convert it to inline data. This is necessary for EPs that can not handle
+/// external initializers that are in memory since our in-memory external data is not ONNX standard.
+/// </summary>
+/// <param name="graph">Graph</param>
+/// <param name="name">intializer name</param>
+/// <returns>Status</returns>
+Status ConvertInMemoryDataToInline(Graph& graph, const std::string& name);
 
 /** Gets the index of an output arg with the specified output arg name. */
 int GetNodeOutputIndexFromOutputName(const Node& node, const std::string& output_name);
@@ -58,6 +131,11 @@ const std::string& GetNodeOutputName(const Node& node, int index);
 @returns nullptr when not found.
 */
 const Node::EdgeEnd* GetInputEdge(const Node& node, int arg_index);
+
+/** Move the input edges that src_node has to target_node.
+After the move is complete src_node will have no input edges.
+*/
+void MoveAllNodeInputEdges(Graph& graph, Node& src_node, Node& target_node);
 
 /** Removes all output edges from the given Node of the Graph.
     This should probably be elevated to the Graph API eventually. */
@@ -89,6 +167,9 @@ struct GraphEdge {
   /** Returns a vector of the input GraphEdges of a node. */
   static std::vector<GraphEdge> GetNodeInputEdges(const Node& node);
 
+  /** Returns a vector of the input GraphEdges of a node for the provided input index. */
+  static std::vector<GraphEdge> GetNodeInputEdges(const Node& node, size_t index);
+
   /** Returns a vector of the output GraphEdges of a node. */
   static std::vector<GraphEdge> GetNodeOutputEdges(const Node& node);
 
@@ -99,6 +180,11 @@ struct GraphEdge {
   static void RemoveGraphEdges(Graph& graph, const std::vector<GraphEdge>& edges);
 };
 
+/** Returns true if the execution provider assigned to current node is present in the compatible providers list
+    or if the compatible_providers list is empty. */
+bool IsSupportedProvider(const Node& node,
+                         const InlinedHashSet<std::string_view>& compatible_providers);
+
 #endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
 /** Checks if the node has the same operator since version as the given one. */
@@ -108,17 +194,25 @@ bool MatchesOpSinceVersion(const Node& node, gsl::span<const ONNX_NAMESPACE::Ope
 /** Checks if the node has the same op set domain as the given one. */
 bool MatchesOpSetDomain(const Node& node, std::string_view domain);
 
+/// <summary>
+/// The function checks that the external data offset points to the same data as the tensor.
+/// </summary>
+/// <param name="tensor_proto"></param>
+/// <param name="tensor"></param>
+/// <returns>true if successful</returns>
+[[nodiscard]] bool CheckInMemoryDataMatch(const ONNX_NAMESPACE::TensorProto& tensor_proto,
+                                          const Tensor& tensor);
+
 #if !defined(ORT_MINIMAL_BUILD)
-/** Returns true if the execution provider assigned to current node is present in the compatible providers list
-    or if the compatible_providers list is empty. */
-bool IsSupportedProvider(const Node& node,
-                         const InlinedHashSet<std::string_view>& compatible_providers);
 
 /** Checks if the output at the specified index is input to downstream Nodes. */
 bool IsOutputUsed(const Node& node, int index);
 
 /** Returns true if the graph has the given input.*/
 bool IsGraphInput(const Graph& graph, const NodeArg* input);
+
+/** Returns true if the graph has the given output.*/
+bool IsGraphOutput(const Graph& graph, const NodeArg* output);
 
 /** returns true if 'name' is an initializer in 'graph', or an ancestor graph if check_outer_scope is true.
 @param check_outer_scope If true and 'graph' is a subgraph, check ancestor graph/s for 'name' if not found in 'graph'.
@@ -238,7 +332,8 @@ e.g. Node A produces outputs A1 and A2.
      to replace B1 (output index 0 for node B) with A2 (output index 1 for node A) as input to the downstream node C.
      The edge that existed between B and C for B1 will be removed, and replaced with an edge between A and C for A2.
 */
-void ReplaceDownstreamNodeInput(Graph& graph, Node& node, int output_idx, Node& replacement, int replacement_output_idx);
+void ReplaceDownstreamNodeInput(Graph& graph, Node& node, int output_idx, Node& replacement,
+                                int replacement_output_idx);
 
 /** Replace the input to a node with a NodeArg.
 @remarks The replacement only updates the node's input definition and does not create any edges,
@@ -254,6 +349,12 @@ void ReplaceNodeInput(Node& target, int target_input_idx, NodeArg& new_input);
          node's input definition and does not create any new edges.
 */
 void AddNodeInput(Node& target, int target_input_idx, NodeArg& new_input);
+
+/** Set a non-variadic optional node input, materializing omitted slots up to target_input_idx.
+@remarks Existing empty slots retain their argument count. Newly materialized slots must correspond to omitted
+         optional inputs with argument count zero. There is no edge between an initializer or graph input and a Node.
+*/
+void SetOptionalNodeInput(Graph& graph, Node& target, size_t target_input_idx, NodeArg& new_input);
 
 /** Finalize the fusion of second_node into first_node.
     The output definitions and edges from the second_node are moved to first_node. second_node is deleted.
@@ -293,11 +394,13 @@ inline void FinalizeNodeFusion(Graph& graph,
     The output definitions and edges from the last node in 'nodes' will be moved to replacement_node.
     All nodes in 'nodes' will be removed.
 */
-inline void FinalizeNodeFusion(Graph& graph, gsl::span<const std::reference_wrapper<Node>> nodes, Node& replacement_node) {
+inline void FinalizeNodeFusion(Graph& graph, gsl::span<const std::reference_wrapper<Node>> nodes,
+                               Node& replacement_node) {
   FinalizeNodeFusion(graph, nodes, replacement_node, replacement_node);
 }
 
-inline void FinalizeNodeFusion(Graph& graph, std::initializer_list<std::reference_wrapper<Node>> nodes, Node& replacement_node) {
+inline void FinalizeNodeFusion(Graph& graph, std::initializer_list<std::reference_wrapper<Node>> nodes,
+                               Node& replacement_node) {
   FinalizeNodeFusion(graph, AsSpan(nodes), replacement_node, replacement_node);
 }
 
@@ -348,17 +451,23 @@ struct EdgeEndToMatch {
     It is recommended to match path from bottom to top direction to avoid such issue.
     It is because each node input (dst_arg_index) only accepts one input edge.
 */
-bool FindPath(const Node& node, bool is_input_edge, gsl::span<const EdgeEndToMatch> edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
+bool FindPath(const Node& node, bool is_input_edge, gsl::span<const EdgeEndToMatch> edges_to_match,
+              std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
 
-inline bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
+inline bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match,
+                     std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
   return FindPath(node, is_input_edge, AsSpan(edges_to_match), result, logger);
 }
 
 /** Same as FindPath above, but return the references of matched Node
  */
-bool FindPath(Graph& graph, const Node& node, bool is_input_edge, gsl::span<const EdgeEndToMatch> edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger);
+bool FindPath(Graph& graph, const Node& node, bool is_input_edge, gsl::span<const EdgeEndToMatch> edges_to_match,
+              std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger);
 
-inline bool FindPath(Graph& graph, const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger) {
+inline bool FindPath(Graph& graph, const Node& node, bool is_input_edge,
+                     std::initializer_list<EdgeEndToMatch> edges_to_match,
+                     std::vector<std::reference_wrapper<Node>>& result,
+                     const logging::Logger& logger) {
   return FindPath(graph, node, is_input_edge, AsSpan(edges_to_match), result, logger);
 }
 
@@ -376,6 +485,22 @@ bool RemoveNodesWithOneOutputBottomUp(Graph& graph, const Node& node);
 NodeArg& CreateNodeArg(Graph& graph, const NodeArg& base_arg);
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
+
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
+
+/// <summary>
+/// This function creates an indexed subgraph from a collection of nodes
+/// using the graph instance. The IndexedSubgraph can then be used to create
+/// a filtered GraphViewer instance that only contains the nodes in the collection.
+/// </summary>
+/// <param name="nodes"></param>
+/// <param name="graph"></param>
+/// <param name="indexed_subgraph"></param>
+/// <returns></returns>
+Status CreateFilteredIndexedGraph(gsl::span<const Node* const> nodes, const Graph& graph,
+                                  std::unique_ptr<IndexedSubGraph>& indexed_subgraph);
+
+#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
 }  // namespace graph_utils
 }  // namespace onnxruntime

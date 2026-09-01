@@ -9,7 +9,6 @@ import platform
 import re
 import sys
 import unittest
-from typing import Dict
 
 import numpy as np
 import onnx
@@ -21,6 +20,13 @@ import onnxruntime.backend as backend  # pylint: disable=consider-using-from-imp
 
 pytest_plugins = ("onnx.backend.test.report",)
 
+# Minimum number of ONNX "node" test cases that must be discovered on disk. This is the Python-leg
+# twin of the C++ onnx_test_runner -m floor and the CMake ORT_ONNX_NODE_MIN_CASES gate; all three
+# MUST move in lockstep if the floor is ever raised. It guards against the node corpus silently
+# disappearing (e.g. post-onnx#7959 when the bundled node/ data is removed, leaving this series to
+# quietly lose node coverage). Today's corpus is ~1799 cases; 1500 leaves ~17% headroom.
+MIN_NODE_CASES = 1500
+
 
 class OrtBackendTest(onnx.backend.test.runner.Runner):
     """ONNX test runner with ORT-specific behavior."""
@@ -28,26 +34,34 @@ class OrtBackendTest(onnx.backend.test.runner.Runner):
     # pylint: disable=too-few-public-methods
     def __init__(
         self,
-        rtol_overrides: Dict[str, float],
-        atol_overrides: Dict[str, float],
+        rtol_overrides: dict[str, float],
+        atol_overrides: dict[str, float],
     ):
         self._rtol_overrides = rtol_overrides
         self._atol_overrides = atol_overrides
+        # Counts "node"-kind test cases discovered on disk. Set before super().__init__ because the
+        # base Runner scans the data dirs (calling _add_model_test) during construction. NOTE: onnx's
+        # Runner passes the *capitalized* category label ("Node"), not the lowercase load kind, so the
+        # match below is case-insensitive.
+        self._node_case_count = 0
 
         super().__init__(backend, parent_module=__name__)
 
     @classmethod
-    def assert_similar_outputs(cls, ref_outputs, outputs, rtol, atol):
-        """Asserts ref_outputs and outputs match to within the given tolerances."""
+    def assert_similar_outputs(cls, ref_outputs, outputs, rtol, atol, model_dir=None):
+        """
+        Asserts ref_outputs and outputs match to within the given tolerances.
+        The `model_dir` parameter is currently unused (added to base Runner class in onnx 1.16.0).
+        """
 
         def assert_similar_array(ref_output, output):
-            np.testing.assert_equal(ref_output.dtype, output.dtype)
+            np.testing.assert_equal(output.dtype, ref_output.dtype)
             if ref_output.dtype == object:
-                np.testing.assert_array_equal(ref_output, output)
+                np.testing.assert_array_equal(output, ref_output)
             else:
-                np.testing.assert_allclose(ref_output, output, rtol=rtol, atol=atol)
+                np.testing.assert_allclose(output, ref_output, rtol=rtol, atol=atol)
 
-        np.testing.assert_equal(len(ref_outputs), len(outputs))
+        np.testing.assert_equal(len(outputs), len(ref_outputs))
         for i in range(len(outputs)):  # pylint: disable=consider-using-enumerate
             if isinstance(outputs[i], list):
                 for j in range(len(outputs[i])):
@@ -66,6 +80,9 @@ class OrtBackendTest(onnx.backend.test.runner.Runner):
         attrs["rtol"] = self._rtol_overrides[model_test.name]
         attrs["atol"] = self._atol_overrides[model_test.name]
 
+        if kind.lower() == "node":
+            self._node_case_count += 1
+
         super()._add_model_test(onnx.backend.test.case.test_case.TestCase(**attrs), kind)
 
 
@@ -73,7 +90,7 @@ def apply_filters(filters, category):
     opset_version = f"opset{onnx.defs.onnx_opset_version()}"
     validated_filters = []
     for f in filters[category]:
-        if type(f) is list:  # noqa: E721
+        if type(f) is list:
             opset_regex = f[0]
             filter_regex = f[1]
             opset_match = re.match(opset_regex, opset_version)
@@ -86,14 +103,16 @@ def apply_filters(filters, category):
 
 def load_jsonc(basename: str):
     """Returns a deserialized object from the JSONC file in testdata/<basename>."""
-    filename = os.path.join(
-        os.path.dirname(os.path.realpath(__file__)),
-        "testdata",
-        basename,
-    )
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"File not found {filename!r}.")
+    filenames = [
+        os.path.join(os.path.dirname(os.path.realpath(__file__)), "testdata", basename),
+        os.path.realpath(os.path.join(os.path.dirname(__file__), "..", "..", "test", "testdata", basename)),
+    ]
 
+    filtered = [f for f in filenames if os.path.exists(f)]
+    if not filtered:
+        raise FileNotFoundError(f"No file found in {filenames!r}.")
+
+    filename = filtered[0]
     with open(filename, encoding="utf-8") as f:  # pylint: disable=invalid-name
         lines = f.readlines()
     lines = [x.split("//")[0] for x in lines]
@@ -113,6 +132,17 @@ def create_backend_test(test_name=None):
 
     backend_test = OrtBackendTest(rtol_overrides, atol_overrides)
 
+    # Consumption-point floor (full runs only; a targeted -t/test_name run intentionally collects a
+    # subset). Fires if the node corpus failed to materialize or has otherwise silently shrunk.
+    if not test_name and backend_test._node_case_count < MIN_NODE_CASES:
+        raise RuntimeError(
+            f"Node test corpus collapsed -- discovered only {backend_test._node_case_count} ONNX "
+            f"'node' test case(s), but at least {MIN_NODE_CASES} are required. See "
+            f"onnx-opset-bump-checklist gotcha (p): onnx#7959 removes the on-disk node-test corpus "
+            f"and corpus absence is otherwise silent-green. The corpus appears missing, empty, or "
+            f"truncated (e.g. #7959 landed and no materialized corpus replaced it)."
+        )
+
     # Type not supported
     backend_test.exclude(r"(FLOAT16)")
 
@@ -131,13 +161,11 @@ def create_backend_test(test_name=None):
         if backend.supports_device("NNAPI"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_NNAPI")
 
-        if backend.supports_device("OPENVINO_GPU_FP32") or backend.supports_device("OPENVINO_GPU_FP16"):
+        if backend.supports_device("OPENVINO_GPU"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_OPENVINO_GPU")
 
-        if backend.supports_device("OPENVINO_CPU_FP32"):
+        if backend.supports_device("OPENVINO_CPU"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_OPENVINO_CPU_FP32")
-
-        if backend.supports_device("OPENVINO_CPU_FP16"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_OPENVINO_CPU_FP16")
 
         if backend.supports_device("OPENVINO_NPU"):
@@ -148,6 +176,12 @@ def create_backend_test(test_name=None):
 
         if backend.supports_device("MIGRAPHX"):
             current_failing_tests += apply_filters(filters, "current_failing_tests_MIGRAPHX")
+
+        if backend.supports_device("WEBGPU"):
+            current_failing_tests += apply_filters(filters, "current_failing_tests_WEBGPU")
+
+        if backend.supports_device("QNN"):
+            current_failing_tests += apply_filters(filters, "current_failing_tests_QNN")
 
         # Skip these tests for a "pure" DML onnxruntime python wheel. We keep these tests enabled for instances where both DML and CUDA
         # EPs are available (Windows GPU CI pipeline has this config) - these test will pass because CUDA has higher precedence than DML

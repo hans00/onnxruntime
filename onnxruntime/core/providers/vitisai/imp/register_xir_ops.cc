@@ -12,13 +12,20 @@ namespace vaip {
 void register_xir_ops(const std::vector<OrtCustomOpDomain*>& domains) {
   for (auto domain : domains) {
     for (auto op : domain->custom_ops_) {
-      auto name = op->GetName(op);
-      if ((std::string)name == "super_layer") {
-        Provider_GetHost()->RegisterSchema(domain->domain_, op, 1);
-      } else if ((std::string)name == "FixNeuron") {
-        Provider_GetHost()->RegisterSchema(domain->domain_, op, 2);
-      } else {
-        Provider_GetHost()->RegisterSchema(domain->domain_, op, 3);
+      // skip dequant quant schema, but register kernel
+      if (Provider_GetHost()->GetSchema(op->GetName(op), op->GetStartVersion(op), domain->domain_) == nullptr) {
+        Provider_GetHost()->RegisterSchema(domain->domain_, op);
+      }
+    }
+  }
+}
+
+void deregister_xir_ops(const std::vector<OrtCustomOpDomain*>& domains) {
+  for (auto domain : domains) {
+    if (domain->domain_ != "com.xilinx") continue;  // skip dequant quant schema
+    for (auto op : domain->custom_ops_) {
+      if (Provider_GetHost()->GetSchema(op->GetName(op), op->GetStartVersion(op), domain->domain_) != nullptr) {
+        Provider_GetHost()->DeregisterSchema(domain->domain_, op->GetName(op), op->GetStartVersion(op));
       }
     }
   }

@@ -21,10 +21,8 @@ struct Color {
 };
 #endif
 
+#ifndef _WIN32
 void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id, const Capture& message) {
-  // operator for formatting of timestamp in ISO8601 format including microseconds
-  using timestamp_ns::operator<<;
-
   // Two options as there may be multiple calls attempting to write to the same sink at once:
   // 1) Use mutex to synchronize access to the stream.
   // 2) Create the message in an ostringstream and output in one call.
@@ -62,11 +60,8 @@ void OStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger
     stream_->flush();
   }
 }
-#ifdef _WIN32
+#else
 void WOStreamSink::SendImpl(const Timestamp& timestamp, const std::string& logger_id, const Capture& message) {
-  // operator for formatting of timestamp in ISO8601 format including microseconds
-  using date::operator<<;
-
   // Two options as there may be multiple calls attempting to write to the same sink at once:
   // 1) Use mutex to synchronize access to the stream.
   // 2) Create the message in an ostringstream and output in one call.

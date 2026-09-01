@@ -1,5 +1,6 @@
 // Inspired by https://github.com/NVIDIA/DALI/blob/main/include/dali/core/static_switch.h
 // and https://github.com/pytorch/pytorch/blob/master/aten/src/ATen/Dispatch.h
+
 #pragma once
 
 /// @param COND       - a boolean expression to switch by
@@ -12,6 +13,7 @@
 ///     some_function<BoolConst>(...);
 /// });
 /// ```
+
 #define BOOL_SWITCH(COND, CONST_NAME, ...)      \
   [&] {                                         \
     if (COND) {                                 \
@@ -22,6 +24,47 @@
       return __VA_ARGS__();                     \
     }                                           \
   }()
+
+#define FLASHATTENTION_DISABLE_ALIBI  // TEMP: Remove if we enable alibi
+#ifdef FLASHATTENTION_DISABLE_ALIBI
+#define ALIBI_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
+  }()
+#else
+#define ALIBI_SWITCH BOOL_SWITCH
+#endif
+
+#ifdef FLASHATTENTION_DISABLE_UNEVEN_K
+#define EVENK_SWITCH(COND, CONST_NAME, ...)  \
+  [&] {                                      \
+    constexpr static bool CONST_NAME = true; \
+    return __VA_ARGS__();                    \
+  }()
+#else
+#define EVENK_SWITCH BOOL_SWITCH
+#endif
+
+#ifdef FLASHATTENTION_DISABLE_SOFTCAP
+#define SOFTCAP_SWITCH(COND, CONST_NAME, ...) \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
+  }()
+#else
+#define SOFTCAP_SWITCH BOOL_SWITCH
+#endif
+
+#ifdef FLASHATTENTION_DISABLE_LOCAL
+#define LOCAL_SWITCH(COND, CONST_NAME, ...)   \
+  [&] {                                       \
+    constexpr static bool CONST_NAME = false; \
+    return __VA_ARGS__();                     \
+  }()
+#else
+#define LOCAL_SWITCH BOOL_SWITCH
+#endif
 
 #define FP16_SWITCH(COND, ...)               \
   [&] {                                      \
@@ -34,7 +77,15 @@
     }                                        \
   }()
 
-#define FWD_HEADDIM_SWITCH(HEADDIM, ...)   \
+#ifdef ORT_QUICK_BUILD
+// Quick build mode: only hdim128 kernels are compiled
+#define HEADDIM_SWITCH(HEADDIM, ...)     \
+  [&] {                                  \
+    constexpr static int kHeadDim = 128; \
+    return __VA_ARGS__();                \
+  }()
+#else
+#define HEADDIM_SWITCH(HEADDIM, ...)       \
   [&] {                                    \
     if (HEADDIM <= 32) {                   \
       constexpr static int kHeadDim = 32;  \
@@ -48,17 +99,12 @@
     } else if (HEADDIM <= 128) {           \
       constexpr static int kHeadDim = 128; \
       return __VA_ARGS__();                \
-    } else if (HEADDIM <= 160) {           \
-      constexpr static int kHeadDim = 160; \
-      return __VA_ARGS__();                \
     } else if (HEADDIM <= 192) {           \
       constexpr static int kHeadDim = 192; \
-      return __VA_ARGS__();                \
-    } else if (HEADDIM <= 224) {           \
-      constexpr static int kHeadDim = 224; \
       return __VA_ARGS__();                \
     } else if (HEADDIM <= 256) {           \
       constexpr static int kHeadDim = 256; \
       return __VA_ARGS__();                \
     }                                      \
   }()
+#endif

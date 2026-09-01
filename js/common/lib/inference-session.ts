@@ -1,17 +1,19 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-import {InferenceSession as InferenceSessionImpl} from './inference-session-impl.js';
-import {OnnxModelOptions} from './onnx-model.js';
-import {OnnxValue, OnnxValueDataLocation} from './onnx-value.js';
+import { InferenceSession as InferenceSessionImpl } from './inference-session-impl.js';
+import { OnnxModelOptions } from './onnx-model.js';
+import { OnnxValue, OnnxValueDataLocation } from './onnx-value.js';
+import type { Tensor } from './tensor.js';
+import { TryGetGlobalType } from './type-helper.js';
 
 /* eslint-disable @typescript-eslint/no-redeclare */
 
 export declare namespace InferenceSession {
   // #region input/output types
 
-  type OnnxValueMapType = {readonly [name: string]: OnnxValue};
-  type NullableOnnxValueMapType = {readonly [name: string]: OnnxValue | null};
+  type OnnxValueMapType = { readonly [name: string]: OnnxValue };
+  type NullableOnnxValueMapType = { readonly [name: string]: OnnxValue | null };
 
   /**
    * A feeds (model inputs) is an object that uses input names as keys and OnnxValue as corresponding values.
@@ -25,12 +27,12 @@ export declare namespace InferenceSession {
    * - An array of string indicating the output names.
    * - An object that use output names as keys and OnnxValue or null as corresponding values.
    *
-   * @remark
+   * @remarks
    * different from input argument, in output, OnnxValue is optional. If an OnnxValue is present it will be
    * used as a pre-allocated value by the inference engine; if omitted, inference engine will allocate buffer
    * internally.
    */
-  type FetchesType = readonly string[]|NullableOnnxValueMapType;
+  type FetchesType = readonly string[] | NullableOnnxValueMapType;
 
   /**
    * A inferencing return type is an object that uses output names as keys and OnnxValue as corresponding values.
@@ -72,14 +74,14 @@ export declare namespace InferenceSession {
      *
      * This setting is available only in ONNXRuntime (Node.js binding and react-native) or WebAssembly backend
      */
-    freeDimensionOverrides?: {readonly [dimensionName: string]: number};
+    freeDimensionOverrides?: { readonly [dimensionName: string]: number };
 
     /**
      * The optimization level.
      *
      * This setting is available only in ONNXRuntime (Node.js binding and react-native) or WebAssembly backend
      */
-    graphOptimizationLevel?: 'disabled'|'basic'|'extended'|'all';
+    graphOptimizationLevel?: 'disabled' | 'basic' | 'extended' | 'layout' | 'all';
 
     /**
      * Whether enable CPU memory arena.
@@ -100,7 +102,7 @@ export declare namespace InferenceSession {
      *
      * This setting is available only in ONNXRuntime (Node.js binding and react-native) or WebAssembly backend
      */
-    executionMode?: 'sequential'|'parallel';
+    executionMode?: 'sequential' | 'parallel';
 
     /**
      * Optimized model file path.
@@ -137,7 +139,7 @@ export declare namespace InferenceSession {
      *
      * This setting is available only in ONNXRuntime (Node.js binding and react-native) or WebAssembly backend
      */
-    logSeverityLevel?: 0|1|2|3|4;
+    logSeverityLevel?: 0 | 1 | 2 | 3 | 4;
 
     /**
      * Log verbosity level.
@@ -152,7 +154,7 @@ export declare namespace InferenceSession {
      *
      * This setting is available only in ONNXRuntime Web for WebGL and WebGPU EP.
      */
-    preferredOutputLocation?: OnnxValueDataLocation|{readonly [outputName: string]: OnnxValueDataLocation};
+    preferredOutputLocation?: OnnxValueDataLocation | { readonly [outputName: string]: OnnxValueDataLocation };
 
     /**
      * Whether enable graph capture.
@@ -201,12 +203,16 @@ export declare namespace InferenceSession {
     webgl: WebGLExecutionProviderOption;
     webgpu: WebGpuExecutionProviderOption;
     webnn: WebNNExecutionProviderOption;
+    qnn: QnnExecutionProviderOption;
     xnnpack: XnnpackExecutionProviderOption;
   }
 
   type ExecutionProviderName = keyof ExecutionProviderOptionMap;
   type ExecutionProviderConfig =
-      ExecutionProviderOptionMap[ExecutionProviderName]|ExecutionProviderOption|ExecutionProviderName|string;
+    | ExecutionProviderOptionMap[ExecutionProviderName]
+    | ExecutionProviderOption
+    | ExecutionProviderName
+    | string;
 
   export interface ExecutionProviderOption {
     readonly name: string;
@@ -239,13 +245,170 @@ export declare namespace InferenceSession {
   }
   export interface WebGpuExecutionProviderOption extends ExecutionProviderOption {
     readonly name: 'webgpu';
-    preferredLayout?: 'NCHW'|'NHWC';
+
+    /**
+     * Specify the preferred layout when running layout sensitive operators.
+     *
+     * @default 'NCHW'
+     */
+    preferredLayout?: 'NCHW' | 'NHWC';
+
+    /**
+     * Specify a list of node names that should be executed on CPU even when WebGPU EP is used.
+     */
+    forceCpuNodeNames?: readonly string[];
+
+    /**
+     * Specify the validation mode for WebGPU execution provider.
+     * - 'disabled': Disable all validation.
+     * When used in Node.js, disable validation may cause process crash if WebGPU errors occur. Be cautious when using
+     * this mode.
+     * When used in web, this mode is equivalent to 'wgpuOnly'.
+     * - 'wgpuOnly': Perform WebGPU internal validation only.
+     * - 'basic': Perform basic validation including WebGPU internal validation. This is the default mode.
+     * - 'full': Perform full validation. This mode may have performance impact. Use it for debugging purpose.
+     *
+     * @default 'basic'
+     */
+    validationMode?: 'disabled' | 'wgpuOnly' | 'basic' | 'full';
+
+    /**
+     * Enable robust buffer access for an ORT-created Dawn device. This is a global, first-device-wins option. Later
+     * conflicting values and values supplied with an external device are ignored with a warning.
+     *
+     * This setting is available only in ONNX Runtime (Node.js binding).
+     *
+     * @default `true` in Debug builds; `false` in Release and RelWithDebInfo builds
+     */
+    enableRobustness?: boolean;
+
+    /**
+     * Specify the cache mode for storage buffers.
+     * - 'disabled': Disable buffer cache. Buffers are destroyed when no longer in use.
+     * - 'lazyRelease': Buffers are released lazily, at the end of the current run.
+     * - 'simple': Released buffers are cached and reused only for requests of the exact same size.
+     * - 'bucket': Released buffers are cached and reused using predefined size buckets. This is the default mode.
+     *
+     * For static-shape models, 'simple' may reduce GPU memory usage, because exact-size buffers are reused across
+     * runs instead of allocating new bucket-sized buffers.
+     *
+     * @default 'bucket'
+     */
+    storageBufferCacheMode?: 'disabled' | 'lazyRelease' | 'simple' | 'bucket';
+
+    /**
+     * Specify the cache mode for uniform buffers.
+     *
+     * See {@link storageBufferCacheMode} for a description of the available modes.
+     *
+     * @default 'simple'
+     */
+    uniformBufferCacheMode?: 'disabled' | 'lazyRelease' | 'simple' | 'bucket';
+
+    /**
+     * Specify the cache mode for query resolve buffers.
+     *
+     * See {@link storageBufferCacheMode} for a description of the available modes.
+     *
+     * @default 'disabled'
+     */
+    queryResolveBufferCacheMode?: 'disabled' | 'lazyRelease' | 'simple' | 'bucket';
+
+    /**
+     * Specify the cache mode for buffers not covered by the other buffer cache mode options.
+     *
+     * See {@link storageBufferCacheMode} for a description of the available modes.
+     *
+     * @default 'disabled'
+     */
+    defaultBufferCacheMode?: 'disabled' | 'lazyRelease' | 'simple' | 'bucket';
+
+    /**
+     * Specify an optional WebGPU device to be used by the WebGPU execution provider.
+     */
+    device?: TryGetGlobalType<'GPUDevice'>;
   }
-  export interface WebNNExecutionProviderOption extends ExecutionProviderOption {
+
+  // #region WebNN options
+
+  interface WebNNExecutionProviderName extends ExecutionProviderOption {
     readonly name: 'webnn';
-    deviceType?: 'cpu'|'gpu';
+  }
+
+  /**
+   * Represents a set of options for creating a WebNN MLContext.
+   *
+   * @see https://www.w3.org/TR/webnn/#dictdef-mlcontextoptions
+   */
+  export interface WebNNContextOptions {
+    deviceType?: 'cpu' | 'gpu' | 'npu';
     numThreads?: number;
-    powerPreference?: 'default'|'low-power'|'high-performance';
+    powerPreference?: 'default' | 'low-power' | 'high-performance';
+  }
+
+  /**
+   * Represents a set of options for WebNN execution provider without MLContext.
+   */
+  export interface WebNNOptionsWithoutMLContext extends WebNNExecutionProviderName, WebNNContextOptions {
+    context?: never;
+  }
+
+  /**
+   * Represents a set of options for WebNN execution provider with MLContext.
+   *
+   * When MLContext is provided, the deviceType is also required so that the WebNN EP can determine the preferred
+   * channel layout.
+   *
+   * @see https://www.w3.org/TR/webnn/#dom-ml-createcontext
+   */
+  export interface WebNNOptionsWithMLContext
+    extends
+      WebNNExecutionProviderName,
+      Omit<WebNNContextOptions, 'deviceType'>,
+      Required<Pick<WebNNContextOptions, 'deviceType'>> {
+    context: TryGetGlobalType<'MLContext'>;
+  }
+
+  /**
+   * Represents a set of options for WebNN execution provider with MLContext which is created from GPUDevice.
+   *
+   * @see https://www.w3.org/TR/webnn/#dom-ml-createcontext-gpudevice
+   */
+  export interface WebNNOptionsWebGpu extends WebNNExecutionProviderName {
+    context: TryGetGlobalType<'MLContext'>;
+    gpuDevice: TryGetGlobalType<'GPUDevice'>;
+  }
+
+  /**
+   * Options for WebNN execution provider.
+   */
+  export type WebNNExecutionProviderOption =
+    | WebNNOptionsWithoutMLContext
+    | WebNNOptionsWithMLContext
+    | WebNNOptionsWebGpu;
+
+  // #endregion
+
+  export interface QnnExecutionProviderOption extends ExecutionProviderOption {
+    readonly name: 'qnn';
+    /**
+     * Specify the QNN backend type. E.g., 'cpu' or 'htp'.
+     * Mutually exclusive with `backendPath`.
+     *
+     * @default 'htp'
+     */
+    backendType?: string;
+    /**
+     * Specify a path to the QNN backend library.
+     * Mutually exclusive with `backendType`.
+     */
+    backendPath?: string;
+    /**
+     * Specify whether to enable HTP FP16 precision.
+     *
+     * @default true
+     */
+    enableFp16Precision?: boolean;
   }
   export interface CoreMLExecutionProviderOption extends ExecutionProviderOption {
     readonly name: 'coreml';
@@ -258,6 +421,7 @@ export declare namespace InferenceSession {
      * COREML_FLAG_ONLY_ENABLE_DEVICE_WITH_ANE = 0x004
      * COREML_FLAG_ONLY_ALLOW_STATIC_INPUT_SHAPES = 0x008
      * COREML_FLAG_CREATE_MLPROGRAM = 0x010
+     * COREML_FLAG_USE_CPU_AND_GPU = 0x020
      * ```
      *
      * See include/onnxruntime/core/providers/coreml/coreml_provider_factory.h for more details.
@@ -271,6 +435,7 @@ export declare namespace InferenceSession {
      * This setting is available only in ONNXRuntime (react-native).
      */
     useCPUOnly?: boolean;
+    useCPUAndGPU?: boolean;
     /**
      * Specify whether to enable CoreML EP on subgraph.
      *
@@ -307,7 +472,7 @@ export declare namespace InferenceSession {
      *
      * This setting is available only in ONNXRuntime (Node.js binding and react-native) or WebAssembly backend
      */
-    logSeverityLevel?: 0|1|2|3|4;
+    logSeverityLevel?: 0 | 1 | 2 | 3 | 4;
 
     /**
      * Log verbosity level.
@@ -354,10 +519,52 @@ export declare namespace InferenceSession {
 
   // #region value metadata
 
-  // eslint-disable-next-line @typescript-eslint/no-empty-interface
-  interface ValueMetadata {
-    // TBD
+  /**
+   * The common part of the value metadata type for both tensor and non-tensor values.
+   */
+  export interface ValueMetadataBase {
+    /**
+     * The name of the specified input or output.
+     */
+    readonly name: string;
   }
+
+  /**
+   * Represents the metadata of a non-tensor value.
+   */
+  export interface NonTensorValueMetadata extends ValueMetadataBase {
+    /**
+     * Get a value indicating whether the value is a tensor.
+     */
+    readonly isTensor: false;
+  }
+
+  /**
+   * Represents the metadata of a tensor value.
+   */
+  export interface TensorValueMetadata extends ValueMetadataBase {
+    /**
+     * Get a value indicating whether the value is a tensor.
+     */
+    readonly isTensor: true;
+    /**
+     * Get the data type of the tensor.
+     */
+    readonly type: Tensor.Type;
+    /**
+     * Get the shape of the tensor.
+     *
+     * If the shape is not defined, the value will an empty array. Otherwise, it will be an array representing the shape
+     * of the tensor. Each element in the array can be a number or a string. If the element is a number, it represents
+     * the corresponding dimension size. If the element is a string, it represents a symbolic dimension.
+     */
+    readonly shape: ReadonlyArray<number | string>;
+  }
+
+  /**
+   * Represents the metadata of a value.
+   */
+  export type ValueMetadata = NonTensorValueMetadata | TensorValueMetadata;
 
   // #endregion
 }
@@ -386,8 +593,11 @@ export interface InferenceSession {
    * @param options - Optional. A set of options that controls the behavior of model inference.
    * @returns A promise that resolves to a map, which uses output names as keys and OnnxValue as corresponding values.
    */
-  run(feeds: InferenceSession.FeedsType, fetches: InferenceSession.FetchesType,
-      options?: InferenceSession.RunOptions): Promise<InferenceSession.ReturnType>;
+  run(
+    feeds: InferenceSession.FeedsType,
+    fetches: InferenceSession.FetchesType,
+    options?: InferenceSession.RunOptions,
+  ): Promise<InferenceSession.ReturnType>;
 
   // #endregion
 
@@ -426,15 +636,15 @@ export interface InferenceSession {
    */
   readonly outputNames: readonly string[];
 
-  // /**
-  //  * Get input metadata of the loaded model.
-  //  */
-  // readonly inputMetadata: ReadonlyArray<Readonly<InferenceSession.ValueMetadata>>;
+  /**
+   * Get input metadata of the loaded model.
+   */
+  readonly inputMetadata: readonly InferenceSession.ValueMetadata[];
 
-  // /**
-  //  * Get output metadata of the loaded model.
-  //  */
-  // readonly outputMetadata: ReadonlyArray<Readonly<InferenceSession.ValueMetadata>>;
+  /**
+   * Get output metadata of the loaded model.
+   */
+  readonly outputMetadata: readonly InferenceSession.ValueMetadata[];
 
   // #endregion
 }
@@ -469,8 +679,12 @@ export interface InferenceSessionFactory {
    * @param options - specify configuration for creating a new inference session.
    * @returns A promise that resolves to an InferenceSession object.
    */
-  create(buffer: ArrayBufferLike, byteOffset: number, byteLength?: number, options?: InferenceSession.SessionOptions):
-      Promise<InferenceSession>;
+  create(
+    buffer: ArrayBufferLike,
+    byteOffset: number,
+    byteLength?: number,
+    options?: InferenceSession.SessionOptions,
+  ): Promise<InferenceSession>;
 
   /**
    * Create a new inference session and load model asynchronously from a Uint8Array.

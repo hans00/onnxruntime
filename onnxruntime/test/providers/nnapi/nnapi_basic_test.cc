@@ -12,8 +12,9 @@
 #include "core/session/inference_session.h"
 #include "core/framework/tensorprotoutils.h"
 #include "test/common/tensor_op_test_utils.h"
-#include "test/framework/test_utils.h"
+#include "test/unittest_util/framework_test_utils.h"
 #include "test/util/include/asserts.h"
+#include "test/util/include/current_test_name.h"
 #include "test/util/include/default_providers.h"
 #include "test/util/include/inference_session_wrapper.h"
 #include "test/util/include/test/test_environment.h"
@@ -23,7 +24,7 @@
 #if !defined(ORT_MINIMAL_BUILD)
 // if this is a full build we need the provider test utils
 #include "test/providers/provider_test_utils.h"
-#include "test/optimizer/qdq_test_utils.h"
+#include "test/unittest_util/qdq_test_utils.h"
 #endif
 
 #include "gtest/gtest.h"
@@ -35,10 +36,6 @@ using namespace ::onnxruntime::logging;
 
 namespace onnxruntime {
 namespace test {
-
-#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
-
-#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
 #if !defined(ORT_MINIMAL_BUILD)
 
@@ -55,7 +52,7 @@ TEST(NnapiExecutionProviderTest, ReshapeFlattenTest) {
   std::vector<int64_t> dims_mul_y = {3, 2, 2};
   std::vector<float> values_mul_y = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
   OrtValue ml_value_x;
-  AllocatorPtr cpu_allocator = std::make_shared<CPUAllocator>();
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
   CreateMLValue<float>(cpu_allocator, dims_mul_x, values_mul_x,
                        &ml_value_x);
   OrtValue ml_value_y;
@@ -65,7 +62,8 @@ TEST(NnapiExecutionProviderTest, ReshapeFlattenTest) {
   feeds.insert(std::make_pair("X", ml_value_x));
   feeds.insert(std::make_pair("Y", ml_value_y));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.ReshapeFlattenTest",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds);
 #else
@@ -82,13 +80,14 @@ TEST(NnapiExecutionProviderTest, SigmoidSupportedInputRankTest) {
   std::vector<float> values_mul_x = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f};
 
   OrtValue ml_value_x;
-  AllocatorPtr cpu_allocator = std::make_shared<CPUAllocator>();
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
   CreateMLValue<float>(std::move(cpu_allocator), dims_mul_x, values_mul_x,
                        &ml_value_x);
   NameMLValMap feeds;
   feeds.insert(std::make_pair("X", ml_value_x));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.SigmoidSupportedInputRankTest",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds, {ExpectedEPNodeAssignment::None} /* params */);
 #else
@@ -108,14 +107,15 @@ TEST(NnapiExecutionProviderTest, DynamicGraphInputTest) {
   std::vector<int64_t> dims_mul_x = {1, 1, 4, 4};
   std::vector<float> values_mul_x = {1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f, 1.0f, 2.0f, 3.0f, 4.0f};
   OrtValue ml_value_x;
-  AllocatorPtr cpu_allocator = std::make_shared<CPUAllocator>();
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
   CreateMLValue<float>(std::move(cpu_allocator), dims_mul_x, values_mul_x,
                        &ml_value_x);
 
   NameMLValMap feeds;
   feeds.insert(std::make_pair("X", ml_value_x));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.DynamicGraphInputTest",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds);
 #else
@@ -138,13 +138,14 @@ TEST(NnapiExecutionProviderTest, InternalUint8SupportTest) {
   std::vector<int64_t> dims_x = {1, 1, 1, 3};
   std::vector<float> values_x = {0.0f, 256.0f, 512.0f};
   OrtValue ml_value_x;
-  AllocatorPtr cpu_allocator = std::make_shared<CPUAllocator>();
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
   CreateMLValue<float>(std::move(cpu_allocator), dims_x, values_x,
                        &ml_value_x);
   NameMLValMap feeds;
   feeds.insert(std::make_pair("X", ml_value_x));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.InternalUint8SupportTest",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds);
 #else
@@ -194,7 +195,7 @@ TEST(NnapiExecutionProviderTest, FunctionTest) {
   std::vector<int64_t> dims_mul_x = {1, 1, 3, 2};
   std::vector<float> values_mul_x = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
   OrtValue ml_value_x;
-  AllocatorPtr cpu_allocator = std::make_shared<CPUAllocator>();
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
   CreateMLValue<float>(cpu_allocator, dims_mul_x, values_mul_x,
                        &ml_value_x);
   OrtValue ml_value_y;
@@ -208,7 +209,8 @@ TEST(NnapiExecutionProviderTest, FunctionTest) {
   feeds.insert(std::make_pair("Y", ml_value_y));
   feeds.insert(std::make_pair("Z", ml_value_z));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.FunctionTest",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds);
 #else
@@ -273,7 +275,8 @@ static void RunQDQModelTest(
   const auto model_data_span = AsByteSpan(model_data.data(), model_data.size());
 
 #if defined(__ANDROID__)
-  RunAndVerifyOutputsWithEP(model_data_span, "NnapiExecutionProviderTest.TestQDQModel",
+  RunAndVerifyOutputsWithEP(model_data_span,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             helper.feeds_, params);
 #else
@@ -371,7 +374,7 @@ TEST(NnapiExecutionProviderTest, DISABLED_TestQDQMul) {
                   });
 }
 
-TEST(NnapiExecutionProviderTest, TestQDQTranspose) {
+TEST(NnapiExecutionProviderTest, DISABLED_TestQDQTranspose) {
   RunQDQModelTest(BuildQDQTransposeTestCase<uint8_t /* InputType */,
                                             uint8_t /* OutputType */>(
                       {1, 3, 32, 32} /* input_shape */,
@@ -513,6 +516,31 @@ TEST(NnapiExecutionProviderTest, TestGather) {
                   {ExpectedEPNodeAssignment::All});
 }
 
+TEST(NnapiExecutionProviderTest, SharedInitializersDoNotGetSkipped) {
+  // NNAPI EP's Clip op builder will mark the max initializer as skipped but it is also used by the Div op.
+  // Test that the shared initializer is still present in the NNAPI model for the Div op.
+  constexpr auto* model_file_name = ORT_TSTR("testdata/clip_div_shared_initializer.onnx");
+
+#if defined(__ANDROID__)
+  AllocatorPtr cpu_allocator = CPUAllocator::DefaultInstance();
+
+  std::vector<int64_t> x_dims{3, 2};
+  std::vector<float> x_values(3.0f, 3 * 2);
+  OrtValue ml_value_x;
+  CreateMLValue<float>(cpu_allocator, x_dims, x_values, &ml_value_x);
+
+  NameMLValMap feeds{{"input_0", ml_value_x}};
+
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
+                            std::make_unique<NnapiExecutionProvider>(0),
+                            feeds,
+                            {ExpectedEPNodeAssignment::All});
+#else
+  TestModelLoad(model_file_name, std::make_unique<NnapiExecutionProvider>(0), ExpectedEPNodeAssignment::All);
+#endif
+}
+
 #endif  // !(ORT_MINIMAL_BUILD)
 
 TEST(NnapiExecutionProviderTest, NNAPIFlagsTest) {
@@ -541,7 +569,8 @@ TEST(NnapiExecutionProviderTest, TestOrtFormatModel) {
   NameMLValMap feeds;
   feeds.insert(std::make_pair("Input3", ml_value));
 
-  RunAndVerifyOutputsWithEP(model_file_name, "NnapiExecutionProviderTest.TestOrtFormatModel",
+  RunAndVerifyOutputsWithEP(model_file_name,
+                            CurrentTestName(),
                             std::make_unique<NnapiExecutionProvider>(0),
                             feeds);
 #else

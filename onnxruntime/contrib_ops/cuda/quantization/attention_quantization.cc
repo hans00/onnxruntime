@@ -52,7 +52,7 @@ Status QAttention<T, int8_t>::CheckInputs(const Tensor* input,
   auto& device_prop = GetDeviceProp();
   ORT_RETURN_IF_ERROR(AttentionBase::CheckInputs(input->Shape(), weights->Shape(), bias->Shape(),
                                                  mask_index, past_tensor,
-                                                 nullptr,  // relative_position_bias
+                                                 nullptr,  // attention_bias
                                                  parameters,
                                                  device_prop.maxThreadsPerBlock));
 
@@ -94,6 +94,8 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
   //   Input 8  - past              : (2, batch_size, num_heads, past_sequence_length, head_size)
   //   Output 0 - output            : (batch_size, sequence_length, hidden_size)
   //   Output 1 - present           : (2, batch_size, num_heads, past_sequence_length + sequence_length, head_size)
+
+  auto ort_stream = GetOrtStream(context);
 
   const Tensor* input = context->Input<Tensor>(0);
   const Tensor* weights = context->Input<Tensor>(1);
@@ -138,8 +140,8 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
   int n = 3 * hidden_size;
   int k = parameters.input_hidden_size;
   size_t num_elements = SafeInt<size_t>(m) * n;
-  auto gemm_buffer = GetScratchBuffer<T>(num_elements * element_size, context->GetComputeStream());
-  auto gemm_buffer_quantized = GetScratchBuffer<int32_t>(num_elements, context->GetComputeStream());
+  auto gemm_buffer = GetScratchBuffer<T>(num_elements * element_size, GetComputeStream(context));
+  auto gemm_buffer_quantized = GetScratchBuffer<int32_t>(num_elements, GetComputeStream(context));
 
   typedef typename ToCudaType<T>::MappedType CudaT;
 
@@ -149,7 +151,8 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
                                weights->Data<int8_t>(), n,
                                gemm_buffer_quantized.get(), n,
                                this,
-                               context->GetComputeStream()));
+                               GetComputeStream(context), Stream(context),
+                               GetCublasHandle(context)));
 
   CudaT dequant_scale;
   CudaT input_scale = *(reinterpret_cast<const CudaT*>(input_scale_tensor->Data<T>()));
@@ -179,6 +182,8 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
   constexpr bool use_fused_cross_attention = false;
   constexpr bool use_memory_efficient_attention = false;
   constexpr bool use_flash_attention = false;
+  constexpr bool use_lean_attention = false;
+  constexpr bool use_cudnn_flash_attention = false;
   size_t workSpaceSize = GetAttentionWorkspaceSize(element_size,
                                                    batch_size,
                                                    parameters.num_heads,
@@ -189,10 +194,13 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
                                                    parameters.total_sequence_length,
                                                    fused_runner,
                                                    use_flash_attention,
+                                                   use_lean_attention,
                                                    use_fused_cross_attention,
-                                                   use_memory_efficient_attention);
+                                                   use_memory_efficient_attention,
+                                                   use_cudnn_flash_attention,
+                                                   true);
 
-  auto work_space = GetScratchBuffer<void>(workSpaceSize, context->GetComputeStream());
+  auto work_space = GetScratchBuffer<void>(workSpaceSize, GetComputeStream(context));
 
   typedef typename ToCudaType<T>::MappedType CudaT;
   AttentionData<CudaT> data;
@@ -208,12 +216,14 @@ Status QAttention<T, int8_t>::ComputeInternal(OpKernelContext* context) const {
 
   data.has_qkv_workspace = true;
   data.workspace = reinterpret_cast<CudaT*>(work_space.get());
+  data.workspace_bytes = workSpaceSize;
   data.output = reinterpret_cast<CudaT*>(output->MutableData<T>());
   if (nullptr != present) {
     data.present = reinterpret_cast<CudaT*>(present->MutableData<T>());
   }
 
-  return QkvToContext<CudaT>(GetDeviceProp(), cublas, context->GetComputeStream(), parameters, data);
+  cudnnHandle_t cudnn = GetCudnnHandle(context);
+  return QkvToContext<CudaT>(GetDeviceProp(), cublas, cudnn, ort_stream.get(), parameters, data);
 }
 
 }  // namespace cuda

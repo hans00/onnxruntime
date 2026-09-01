@@ -12,6 +12,7 @@ namespace test {
 
 struct BaseAttentionTestData {
   bool is_static_kv = true;
+  bool buffer_share = false;
   int hidden_size;
   int v_hidden_size;
   int num_heads;
@@ -27,17 +28,25 @@ struct BaseAttentionTestData {
   std::vector<float> qkv_data;
 
   std::vector<float> bias_data;
-  std::vector<float> rel_pos_bias_data;
-  bool broadcast_rel_pos_bias;
+  std::vector<float> attention_bias_data;
+  bool broadcast_attention_bias;
 
   std::vector<float> past_key_data;
   std::vector<float> past_value_data;
+
+  std::vector<int32_t> past_seq_len_data;
+  std::vector<int32_t> cache_indir_data;
+  int num_beams;
+  int max_sequence_length;
 
   std::vector<float> fp32_output_data;
   std::vector<float> fp16_output_data;
 
   std::vector<float> present_key_data;
   std::vector<float> present_value_data;
+
+  std::vector<float> fp32_output_qk_data;
+  std::vector<float> fp16_output_qk_data;
 
   std::vector<AttentionKernelType> skip_kernel_types;  // skip some kernels if they do not supported this test case.
 };
@@ -72,30 +81,36 @@ void GetCrossAttentionData_HeadSize16_8_NoBias(AttentionTestData& data);
 void GetCrossAttentionData_HeadSize16(AttentionTestData& data);
 void GetCrossAttentionData_HeadSize16_NoBias(AttentionTestData& data);
 
+void GetCrossAttentionData_HeadSize8(AttentionTestData& data);
+void GetCrossAttentionData_HeadSize8_NoBias(AttentionTestData& data);
+
 void GetCrossAttentionDataWithPast(AttentionTestData& data);
-void GetSelfAttentionData_WithPast_WithRelPosBias_ForT5(AttentionTestData& data);
+void GetSelfAttentionData_WithPast_WithAttnBias_ForT5(AttentionTestData& data);
 
 void GetCrossAttentionData_DiffSequenceLengths(AttentionTestData& data);
 void GetCrossAttentionData_DiffSequenceLengths_HeadSize8(AttentionTestData& data);
 void GetCrossAttentionData_DiffSequenceLengths_HeadSize8_NoBias(AttentionTestData& data);
-void GetSelfAttentionData_WithPastAndPresent_NoMask_NoRelPosBias(AttentionTestData& data);
-void GetSelfAttentionData_WithPastAndPresent_HeadSize8_NoMask_NoRelPosBias(AttentionTestData& data);
-void GetSelfAttentionData_WithPastAndPresent_HeadSize8_NoMask_NoRelPosBias_NoBias(AttentionTestData& data);
+void GetSelfAttentionData_WithPastAndPresent_NoMask_NoAttnBias(AttentionTestData& data);
+void GetSelfAttentionData_WithPastAndPresent_HeadSize8_NoMask_NoAttnBias(AttentionTestData& data);
+void GetSelfAttentionData_WithPastAndPresent_HeadSize8_NoMask_NoAttnBias_NoBias(AttentionTestData& data);
 void GetCrossAttentionData_WithPastPassedInDirectly_NoMask(AttentionTestData& data);
+
+void GetSelfAttention_PastPresentBufferShare_UsingDMMHAInsideMHA(AttentionTestData& data);
+void GetCrossAttention_DiffSequenceLengths_UsingDMMHAInsideMHA(AttentionTestData& data);
 
 void GetCausal_EmptyPastState(std::vector<float>& input, std::vector<float>& output, std::vector<float>& present);
 
-void GetAttentionDataCutlassRelPosBias(AttentionTestData& data);
+void GetAttentionDataCutlassAttnBias(AttentionTestData& data);
 void GetAttentionDataWithNeoXRotaryEmbedding(std::vector<float>& input,
                                              std::vector<float>& weights,
                                              std::vector<float>& bias,
                                              std::vector<float>& output);
 
-void GetPackedMultiHeadAttentionData_Batch2_HeadSize32_NoRelPosBias(PackedAttentionTestData& data);
+void GetPackedMultiHeadAttentionData_Batch2_HeadSize32_NoAttnBias(PackedAttentionTestData& data);
 
-void GetPackedMultiHeadAttentionData_Batch2_HeadSize8_RelPosBias(PackedAttentionTestData& data);
+void GetPackedMultiHeadAttentionData_Batch2_HeadSize8_AttnBias(PackedAttentionTestData& data);
 
-void GetPackedMultiHeadAttentionData_Batch2_HeadSize8_BroadcastRelPosBias(PackedAttentionTestData& data);
+void GetPackedMultiHeadAttentionData_Batch2_HeadSize8_BroadcastAttnBias(PackedAttentionTestData& data);
 
 bool SkipAttentionKernel(AttentionTestData& data, AttentionKernelType kernel_type);
 }  // namespace test

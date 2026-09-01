@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-import {TensorView} from '../../tensor-view';
-import {ShapeUtil} from '../../util';
-import {ComputeContext, ProgramInfo} from '../types';
+import { TensorView } from '../../tensor-view';
+import { ShapeUtil } from '../../util';
+import { ComputeContext, ProgramInfo } from '../types';
 
-import {inputVariable, outputVariable, ShaderHelper} from './common';
+import { inputVariable, outputVariable, ShaderHelper } from './common';
 
 const validateInputs = (inputs: readonly TensorView[]): void => {
   if (inputs[0].dims.length !== 3) {
@@ -29,7 +29,7 @@ const createBiasAddProgramInfo = (inputs: readonly TensorView[]): ProgramInfo =>
   const outputShape = inputs[0].dims;
 
   const channels = inputs[0].dims[2];
-  // since channel number can be only 320/640/1280, it's always divisable by 4
+  // since channel number can be only 320/640/1280, it's always divisible by 4
   const outputSize = ShapeUtil.size(outputShape) / 4;
 
   const dataType = inputs[0].dataType;
@@ -52,8 +52,8 @@ const createBiasAddProgramInfo = (inputs: readonly TensorView[]): ProgramInfo =>
   return {
     name: 'BiasAdd',
     getRunData: () => ({
-      outputs: [{dims: outputShape, dataType: inputs[0].dataType}],
-      dispatchGroup: {x: Math.ceil(outputSize / 64 /* workgroup size */)}
+      outputs: [{ dims: outputShape, dataType: inputs[0].dataType }],
+      dispatchGroup: { x: Math.ceil(outputSize / 64 /* workgroup size */) },
     }),
     getShaderSource,
   };

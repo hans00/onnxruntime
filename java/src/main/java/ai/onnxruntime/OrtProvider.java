@@ -31,8 +31,6 @@ public enum OrtProvider {
   MI_GRAPH_X("MIGraphXExecutionProvider"),
   /** The ARM Compute Library execution provider. */
   ACL("ACLExecutionProvider"),
-  /** The ARM NN execution provider. */
-  ARM_NN("ArmNNExecutionProvider"),
   /** The AMD ROCm execution provider. */
   ROCM("ROCMExecutionProvider"),
   /** The Apple CoreML execution provider. */
@@ -40,7 +38,11 @@ public enum OrtProvider {
   /** The XNNPACK execution provider. */
   XNNPACK("XnnpackExecutionProvider"),
   /** The Azure remote endpoint execution provider. */
-  AZURE("AzureExecutionProvider");
+  AZURE("AzureExecutionProvider"),
+  /** The QNN execution provider. */
+  QNN("QNNExecutionProvider"),
+  /** The WebGPU execution provider */
+  WEBGPU("WebGpuExecutionProvider");
 
   private static final Map<String, OrtProvider> valueMap = new HashMap<>(values().length);
 

@@ -3,9 +3,7 @@
 
 #pragma once
 
-#include "core/common/gsl.h"
-
-#include <cudnn.h>
+#include <gsl/gsl>
 
 #include "core/providers/cuda/cuda_kernel.h"
 #include "core/providers/cuda/cudnn_common.h"
@@ -40,9 +38,16 @@ class CudnnRNN {
 
   Status Set(int64_t input_size, int64_t hidden_size, int64_t proj_size, int num_layers,
              cudnnDropoutDescriptor_t cudnn_dropout_desc, cudnnDirectionMode_t cudnn_direction_model,
-             cudnnRNNMode_t rnn_mode, bool has_bias, cudnnDataType_t dataType) {
+             cudnnRNNMode_t rnn_mode, bool has_bias, cudnnDataType_t dataType, bool use_tf32) {
     if (!cudnn_rnn_desc_)
       CUDNN_RETURN_IF_ERROR(cudnnCreateRNNDescriptor(&cudnn_rnn_desc_));
+
+    cudnnMathType_t mathType = CUDNN_DEFAULT_MATH;
+    if (dataType == CUDNN_DATA_HALF) {
+      mathType = CUDNN_TENSOR_OP_MATH;
+    } else if (dataType == CUDNN_DATA_FLOAT && !use_tf32) {
+      mathType = CUDNN_FMA_MATH;  // omit TF32 tensor cores
+    }
 
     CUDNN_RETURN_IF_ERROR(cudnnSetRNNDescriptor_v8(cudnn_rnn_desc_,
                                                    CUDNN_RNN_ALGO_STANDARD,  // CUDNN_RNN_ALGO_PERSIST_STATIC, CUDNN_RNN_ALGO_PERSIST_DYNAMIC
@@ -52,10 +57,10 @@ class CudnnRNN {
                                                    CUDNN_LINEAR_INPUT,
                                                    dataType,
                                                    dataType,
-                                                   dataType == CUDNN_DATA_HALF ? CUDNN_TENSOR_OP_MATH : CUDNN_DEFAULT_MATH,
-                                                   gsl::narrow_cast<int>(input_size),
-                                                   gsl::narrow_cast<int>(hidden_size),
-                                                   gsl::narrow_cast<int>(proj_size),  // projected size
+                                                   mathType,
+                                                   gsl::narrow<int>(input_size),
+                                                   gsl::narrow<int>(hidden_size),
+                                                   gsl::narrow<int>(proj_size),  // projected size
                                                    num_layers,
                                                    cudnn_dropout_desc,
                                                    // CUDNN_RNN_DATA_LAYOUT_SEQ_MAJOR_UNPACKED works with CUDNN_RNN_PADDED_IO_ENABLED, so that it will auto fill 0 for the shorter sequences
@@ -133,7 +138,8 @@ class CudnnRnnBase : public CudaKernel {
                            IAllocatorUniquePtr<void>& target_w_data,
                            CudnnFilterDescriptor& target_w_desc,
                            CudnnRNN& rnn_desc,
-                           onnxruntime::Stream* ort_stream) const;
+                           void* alloc_stream, cudaStream_t cuda_stream,
+                           cudnnHandle_t cudnn_handle) const;
 
   Status SetWeightBias(const cudnnHandle_t handle,
                        const cudnnRNNDescriptor_t rnn_desc,
@@ -142,16 +148,15 @@ class CudnnRnnBase : public CudaKernel {
                        const void* w_data,
                        const int lin_layer_id,
                        const T* pos,
-                       int& offset,
+                       size_t& offset,
                        bool is_matrix,
                        cudaStream_t cuda_stream) const;
 
-  void SetZeroSequences(const int64_t zero_seq_index_cache_size,
-                        const std::vector<int32_t> zero_seq_index_cache,
+  void SetZeroSequences(gsl::span<const int32_t> zero_seq_index_cache,
                         T* y_data,
                         T* y_h_data,
                         T* y_c_data,
-                        onnxruntime::Stream* cuda_stream) const;
+                        void* alloc_stream, cudaStream_t cuda_stream) const;
 
  protected:
   // W_lin_layer_id_ & R_lin_layer_id_ are set in Constructor

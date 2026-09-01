@@ -12,6 +12,13 @@
 namespace onnxruntime {
 namespace test {
 
+template <typename T>
+class TransposeOpTest : public ::testing::Test {
+};
+
+using TransposeOpTestTypes = ::testing::Types<float, MLFloat16>;
+TYPED_TEST_SUITE(TransposeOpTest, TransposeOpTestTypes);
+
 TEST(TransposeOpTest, IsTransposeReshapeTest) {
   std::vector<int64_t> input_dims{1, 2, 3, 4, 1};
   std::vector<size_t> perm{0, 1, 2, 3, 4};
@@ -49,31 +56,32 @@ void TransposeTest(const std::vector<int64_t>& input_shape,
                    const std::vector<int64_t>* p_perm,
                    const std::vector<int64_t>& expected_shape,
                    const std::vector<T>& expected_vals,
-                   const std::unordered_set<std::string>& excluded_provider_types = {}) {
-  OpTester test("Transpose");
-  if (nullptr != p_perm)
-    test.AddAttribute("perm", *p_perm);
-  test.AddInput<T>("X", input_shape, input_vals);
-  test.AddOutput<T>("Y", expected_shape, expected_vals);
+                   const std::unordered_set<std::string>& excluded_provider_types = {},
+                   const std::vector<int>& opsets = {7}) {
+  for (auto opset : opsets) {
+    OpTester test("Transpose", opset);
+    if (nullptr != p_perm)
+      test.AddAttribute("perm", *p_perm);
+    test.AddInput<T>("X", input_shape, input_vals);
+    test.AddOutput<T>("Y", expected_shape, expected_vals);
 
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_provider_types);
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_provider_types);
+  }
 }
 
 // Test 2 dimensional transpose, with no permutation attribute specified
-TEST(TransposeOpTest, TwoDimNoAttr) {
+TYPED_TEST(TransposeOpTest, TwoDimNoAttr) {
   std::vector<int64_t> input_shape({2, 3});
-  std::vector<float> input_vals = {
-      1.0f, 2.0f, 3.0f,
-      4.0f, 5.0f, 6.0f};
+  std::vector<TypeParam> input_vals = GetTypedArray<TypeParam>({1.0f, 2.0f, 3.0f,
+                                                                4.0f, 5.0f, 6.0f});
 
   std::vector<int64_t> expected_shape({3, 2});
-  std::vector<float> expected_vals = {
-      1.0f, 4.0f,
-      2.0f, 5.0f,
-      3.0f, 6.0f};
+  std::vector<TypeParam> expected_vals = GetTypedArray<TypeParam>({1.0f, 4.0f,
+                                                                   2.0f, 5.0f,
+                                                                   3.0f, 6.0f});
 
   TransposeTest(input_shape, input_vals, nullptr, expected_shape, expected_vals,
-                {kTensorrtExecutionProvider});  // TensorRT: SegFault error
+                {kTensorrtExecutionProvider}, {7, 21});  // TensorRT: SegFault error
 }
 
 TEST(TransposeOpTest, TwoDimNoAttrStr) {
@@ -88,7 +96,7 @@ TEST(TransposeOpTest, TwoDimNoAttrStr) {
       "2", "5",
       "3", "6"};
 
-  TransposeTest(input_shape, input_vals, nullptr, expected_shape, expected_vals);
+  TransposeTest(input_shape, input_vals, nullptr, expected_shape, expected_vals, {}, {7, 21});
 }
 
 // Test 2 dimensional transpose, with permutation attribute specified
@@ -103,7 +111,319 @@ TEST(TransposeOpTest, TwoDim) {
                                       2.0f, 5.0f,
                                       3.0f, 6.0f};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals);
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {}, {7, 21});
+}
+
+// Test Int4 transpose with odd inner dimension.
+TEST(TransposeOpTest, TwoDim_Odd_Int4) {
+  constexpr int8_t unused_val = 0;
+  std::vector<int64_t> input_shape({5, 3});
+  std::vector<Int4x2> input_vals = {Int4x2(1, 2), Int4x2(3, 4), Int4x2(5, 6), Int4x2(7, 8),
+                                    Int4x2(9, 10), Int4x2(11, 12), Int4x2(13, 14), Int4x2(15, unused_val)};
+
+  std::vector<int64_t> perm = {1, 0};
+  std::vector<int64_t> expected_shape({3, 5});
+  std::vector<Int4x2> expected_vals = {Int4x2(1, 4), Int4x2(7, 10), Int4x2(13, 2), Int4x2(5, 8),
+                                       Int4x2(11, 14), Int4x2(3, 6), Int4x2(9, 12), Int4x2(15, unused_val)};
+
+  OpTester test("Transpose", 21);
+  test.AddAttribute("perm", perm);
+  test.AddInput<Int4x2>("X", input_shape, input_vals);
+  test.AddOutput<Int4x2>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test UInt4 transpose with odd inner dimension.
+TEST(TransposeOpTest, TwoDim_Odd_UInt4) {
+  constexpr int8_t unused_val = 0;
+  std::vector<int64_t> input_shape({5, 3});
+  std::vector<UInt4x2> input_vals = {UInt4x2(1, 2), UInt4x2(3, 4), UInt4x2(5, 6), UInt4x2(7, 8),
+                                     UInt4x2(9, 10), UInt4x2(11, 12), UInt4x2(13, 14), UInt4x2(15, unused_val)};
+
+  std::vector<int64_t> perm = {1, 0};
+  std::vector<int64_t> expected_shape({3, 5});
+  std::vector<UInt4x2> expected_vals = {UInt4x2(1, 4), UInt4x2(7, 10), UInt4x2(13, 2), UInt4x2(5, 8),
+                                        UInt4x2(11, 14), UInt4x2(3, 6), UInt4x2(9, 12), UInt4x2(15, unused_val)};
+
+  OpTester test("Transpose", 21);
+  test.AddAttribute("perm", perm);
+  test.AddInput<UInt4x2>("X", input_shape, input_vals);
+  test.AddOutput<UInt4x2>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test Int2 transpose with inner dimension % 4 == 0
+TEST(TransposeOpTest, TwoDim_Int2_Mod4_0) {
+  // Shape (3, 4): 12 elements, 3 bytes needed, no padding
+  std::vector<int64_t> input_shape({3, 4});
+  // Input layout (row-major flattened):
+  // Row 0: 1, -1, -2, 1
+  // Row 1: -2, 1, -1, -2
+  // Row 2: 1, -1, 1, -2
+  // Flattened: [1, -1, -2, 1, -2, 1, -1, -2, 1, -1, 1, -2]
+  std::vector<Int2x4> input_vals = {Int2x4(1, -1, -2, 1), Int2x4(-2, 1, -1, -2), Int2x4(1, -1, 1, -2)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (4, 3): 12 elements, 3 bytes needed
+  // Transposed layout:
+  // Row 0: 1, -2, 1
+  // Row 1: -1, 1, -1
+  // Row 2: -2, -1, 1
+  // Row 3: 1, -2, -2
+  // Flattened: [1, -2, 1, -1, 1, -1, -2, -1, 1, 1, -2, -2]
+  std::vector<int64_t> expected_shape({4, 3});
+  std::vector<Int2x4> expected_vals = {Int2x4(1, -2, 1, -1), Int2x4(1, -1, -2, -1), Int2x4(1, 1, -2, -2)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<Int2x4>("X", input_shape, input_vals);
+  test.AddOutput<Int2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test Int2 transpose with inner dimension % 4 == 1
+TEST(TransposeOpTest, TwoDim_Int2_Mod4_1) {
+  // Shape (3, 5): 15 elements, 4 bytes needed, 1 padding
+  std::vector<int64_t> input_shape({3, 5});
+  // Input layout (row-major flattened):
+  // Row 0: 1, -1, -2, 1, -1
+  // Row 1: -2, 1, -1, -2, 1
+  // Row 2: -1, -2, 1, -1, -2
+  // Flattened: [1, -1, -2, 1, -1, -2, 1, -1, -2, 1, -1, -2, 1, -1, -2, 0(pad)]
+  std::vector<Int2x4> input_vals = {Int2x4(1, -1, -2, 1), Int2x4(-1, -2, 1, -1),
+                                    Int2x4(-2, 1, -1, -2), Int2x4(1, -1, -2, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (5, 3): 15 elements, 4 bytes needed
+  // Transposed layout:
+  // Row 0: 1, -2, -1
+  // Row 1: -1, 1, -2
+  // Row 2: -2, -1, 1
+  // Row 3: 1, -2, -1
+  // Row 4: -1, 1, -2
+  // Flattened: [1, -2, -1, -1, 1, -2, -2, -1, 1, 1, -2, -1, -1, 1, -2, 0(pad)]
+  std::vector<int64_t> expected_shape({5, 3});
+  std::vector<Int2x4> expected_vals = {Int2x4(1, -2, -1, -1), Int2x4(1, -2, -2, -1),
+                                       Int2x4(1, 1, -2, -1), Int2x4(-1, 1, -2, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<Int2x4>("X", input_shape, input_vals);
+  test.AddOutput<Int2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test Int2 transpose with inner dimension % 4 == 2
+TEST(TransposeOpTest, TwoDim_Int2_Mod4_2) {
+  // Shape (3, 6): 18 elements, 5 bytes needed, 2 padding
+  std::vector<int64_t> input_shape({3, 6});
+  // Input layout (row-major flattened):
+  // Row 0: 1, -1, -2, 1, -1, -2
+  // Row 1: 1, -2, -1, 1, -2, -1
+  // Row 2: -1, 1, -2, -1, 1, -2
+  // Flattened: [1, -1, -2, 1, -1, -2, 1, -2, -1, 1, -2, -1, -1, 1, -2, -1, 1, -2, 0(pad), 0(pad)]
+  std::vector<Int2x4> input_vals = {Int2x4(1, -1, -2, 1), Int2x4(-1, -2, 1, -2),
+                                    Int2x4(-1, 1, -2, -1), Int2x4(-1, 1, -2, -1),
+                                    Int2x4(1, -2, 0, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (6, 3): 18 elements, 5 bytes needed
+  // Transposed layout:
+  // Row 0: 1, 1, -1
+  // Row 1: -1, -2, 1
+  // Row 2: -2, -1, -2
+  // Row 3: 1, 1, -1
+  // Row 4: -1, -2, 1
+  // Row 5: -2, -1, -2
+  // Flattened: [1, 1, -1, -1, -2, 1, -2, -1, -2, 1, 1, -1, -1, -2, 1, -2, -1, -2, 0(pad), 0(pad)]
+  std::vector<int64_t> expected_shape({6, 3});
+  std::vector<Int2x4> expected_vals = {Int2x4(1, 1, -1, -1), Int2x4(-2, 1, -2, -1),
+                                       Int2x4(-2, 1, 1, -1), Int2x4(-1, -2, 1, -2),
+                                       Int2x4(-1, -2, 0, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<Int2x4>("X", input_shape, input_vals);
+  test.AddOutput<Int2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test Int2 transpose with inner dimension % 4 == 3
+TEST(TransposeOpTest, TwoDim_Int2_Mod4_3) {
+  // Shape (3, 7): 21 elements, 6 bytes needed, 3 padding
+  std::vector<int64_t> input_shape({3, 7});
+  // Input layout (row-major flattened):
+  // Row 0: 1, -1, -2, 1, -1, -2, 1
+  // Row 1: -2, 1, -1, -2, 1, -1, -2
+  // Row 2: 1, -2, 1, -1, -2, 1, -1
+  // Flattened: [1, -1, -2, 1, -1, -2, 1, -2, 1, -1, -2, 1, -1, -2, 1, -2, 1, -1, -2, 1, -1, 0, 0, 0]
+  std::vector<Int2x4> input_vals = {Int2x4(1, -1, -2, 1), Int2x4(-1, -2, 1, -2),
+                                    Int2x4(1, -1, -2, 1), Int2x4(-1, -2, 1, -2),
+                                    Int2x4(1, -1, -2, 1), Int2x4(-1, 0, 0, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (7, 3): 21 elements, 6 bytes needed
+  // Transposed layout:
+  // Row 0: 1, -2, 1
+  // Row 1: -1, 1, -2
+  // Row 2: -2, -1, 1
+  // Row 3: 1, -2, -1
+  // Row 4: -1, 1, -2
+  // Row 5: -2, -1, 1
+  // Row 6: 1, -2, -1
+  // Flattened: [1, -2, 1, -1, 1, -2, -2, -1, 1, 1, -2, -1, -1, 1, -2, -2, -1, 1, 1, -2, -1, 0, 0, 0]
+  std::vector<int64_t> expected_shape({7, 3});
+  std::vector<Int2x4> expected_vals = {Int2x4(1, -2, 1, -1), Int2x4(1, -2, -2, -1),
+                                       Int2x4(1, 1, -2, -1), Int2x4(-1, 1, -2, -2),
+                                       Int2x4(-1, 1, 1, -2), Int2x4(-1, 0, 0, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<Int2x4>("X", input_shape, input_vals);
+  test.AddOutput<Int2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test UInt2 transpose with inner dimension % 4 == 0
+TEST(TransposeOpTest, TwoDim_UInt2_Mod4_0) {
+  // Shape (3, 4): 12 elements, 3 bytes needed, no padding
+  std::vector<int64_t> input_shape({3, 4});
+  // Input layout (row-major flattened):
+  // Row 0: 1, 2, 3, 1
+  // Row 1: 2, 3, 1, 2
+  // Row 2: 3, 1, 2, 3
+  // Flattened: [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3]
+  std::vector<UInt2x4> input_vals = {UInt2x4(1, 2, 3, 1), UInt2x4(2, 3, 1, 2), UInt2x4(3, 1, 2, 3)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (4, 3): 12 elements, 3 bytes needed
+  // Transposed layout:
+  // Row 0: 1, 2, 3
+  // Row 1: 2, 3, 1
+  // Row 2: 3, 1, 2
+  // Row 3: 1, 2, 3
+  // Flattened: [1, 2, 3, 2, 3, 1, 3, 1, 2, 1, 2, 3]
+  std::vector<int64_t> expected_shape({4, 3});
+  std::vector<UInt2x4> expected_vals = {UInt2x4(1, 2, 3, 2), UInt2x4(3, 1, 3, 1), UInt2x4(2, 1, 2, 3)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<UInt2x4>("X", input_shape, input_vals);
+  test.AddOutput<UInt2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test UInt2 transpose with inner dimension % 4 == 1
+TEST(TransposeOpTest, TwoDim_UInt2_Mod4_1) {
+  // Shape (3, 5): 15 elements, 4 bytes needed, 1 padding
+  std::vector<int64_t> input_shape({3, 5});
+  // Input layout (row-major flattened):
+  // Row 0: 1, 2, 3, 1, 2
+  // Row 1: 3, 1, 2, 3, 1
+  // Row 2: 2, 3, 1, 2, 3
+  // Flattened: [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 0(pad)]
+  std::vector<UInt2x4> input_vals = {UInt2x4(1, 2, 3, 1), UInt2x4(2, 3, 1, 2),
+                                     UInt2x4(3, 1, 2, 3), UInt2x4(1, 2, 3, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (5, 3): 15 elements, 4 bytes needed
+  // Transposed layout:
+  // Row 0: 1, 3, 2
+  // Row 1: 2, 1, 3
+  // Row 2: 3, 2, 1
+  // Row 3: 1, 3, 2
+  // Row 4: 2, 1, 3
+  // Flattened: [1, 3, 2, 2, 1, 3, 3, 2, 1, 1, 3, 2, 2, 1, 3, 0(pad)]
+  std::vector<int64_t> expected_shape({5, 3});
+  std::vector<UInt2x4> expected_vals = {UInt2x4(1, 3, 2, 2), UInt2x4(1, 3, 3, 2),
+                                        UInt2x4(1, 1, 3, 2), UInt2x4(2, 1, 3, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<UInt2x4>("X", input_shape, input_vals);
+  test.AddOutput<UInt2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test UInt2 transpose with inner dimension % 4 == 2
+TEST(TransposeOpTest, TwoDim_UInt2_Mod4_2) {
+  // Shape (3, 6): 18 elements, 5 bytes needed, 2 padding
+  std::vector<int64_t> input_shape({3, 6});
+  // Input layout (row-major flattened):
+  // Row 0: 1, 2, 3, 1, 2, 3
+  // Row 1: 2, 3, 1, 2, 3, 1
+  // Row 2: 3, 1, 2, 3, 1, 2
+  // Flattened: [1, 2, 3, 1, 2, 3, 2, 3, 1, 2, 3, 1, 3, 1, 2, 3, 1, 2, 0(pad), 0(pad)]
+  std::vector<UInt2x4> input_vals = {UInt2x4(1, 2, 3, 1), UInt2x4(2, 3, 2, 3),
+                                     UInt2x4(1, 2, 3, 1), UInt2x4(3, 1, 2, 3),
+                                     UInt2x4(1, 2, 0, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (6, 3): 18 elements, 5 bytes needed
+  // Transposed layout:
+  // Row 0: 1, 2, 3
+  // Row 1: 2, 3, 1
+  // Row 2: 3, 1, 2
+  // Row 3: 1, 2, 3
+  // Row 4: 2, 3, 1
+  // Row 5: 3, 1, 2
+  // Flattened: [1, 2, 3, 2, 3, 1, 3, 1, 2, 1, 2, 3, 2, 3, 1, 3, 1, 2, 0(pad), 0(pad)]
+  std::vector<int64_t> expected_shape({6, 3});
+  std::vector<UInt2x4> expected_vals = {UInt2x4(1, 2, 3, 2), UInt2x4(3, 1, 3, 1),
+                                        UInt2x4(2, 1, 2, 3), UInt2x4(2, 3, 1, 3),
+                                        UInt2x4(1, 2, 0, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<UInt2x4>("X", input_shape, input_vals);
+  test.AddOutput<UInt2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+// Test UInt2 transpose with inner dimension % 4 == 3
+TEST(TransposeOpTest, TwoDim_UInt2_Mod4_3) {
+  // Shape (3, 7): 21 elements, 6 bytes needed, 3 padding
+  std::vector<int64_t> input_shape({3, 7});
+  // Input layout (row-major flattened):
+  // Row 0: 1, 2, 3, 1, 2, 3, 1
+  // Row 1: 2, 3, 1, 2, 3, 1, 2
+  // Row 2: 3, 1, 2, 3, 1, 2, 3
+  // Flattened: [1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 1, 2, 3, 0, 0, 0]
+  std::vector<UInt2x4> input_vals = {UInt2x4(1, 2, 3, 1), UInt2x4(2, 3, 1, 2),
+                                     UInt2x4(3, 1, 2, 3), UInt2x4(1, 2, 3, 1),
+                                     UInt2x4(2, 3, 1, 2), UInt2x4(3, 0, 0, 0)};
+
+  std::vector<int64_t> perm = {1, 0};
+  // Transposed shape (7, 3): 21 elements, 6 bytes needed
+  // Transposed layout:
+  // Row 0: 1, 2, 3
+  // Row 1: 2, 3, 1
+  // Row 2: 3, 1, 2
+  // Row 3: 1, 2, 3
+  // Row 4: 2, 3, 1
+  // Row 5: 3, 1, 2
+  // Row 6: 1, 2, 3
+  // Flattened: [1, 2, 3, 2, 3, 1, 3, 1, 2, 1, 2, 3, 2, 3, 1, 3, 1, 2, 1, 2, 3, 0, 0, 0]
+  std::vector<int64_t> expected_shape({7, 3});
+  std::vector<UInt2x4> expected_vals = {UInt2x4(1, 2, 3, 2), UInt2x4(3, 1, 3, 1),
+                                        UInt2x4(2, 1, 2, 3), UInt2x4(2, 3, 1, 3),
+                                        UInt2x4(1, 2, 1, 2), UInt2x4(3, 0, 0, 0)};
+
+  OpTester test("Transpose", 25);
+  test.AddAttribute("perm", perm);
+  test.AddInput<UInt2x4>("X", input_shape, input_vals);
+  test.AddOutput<UInt2x4>("Y", expected_shape, expected_vals);
+
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
 }
 
 TEST(TransposeOpTest, TwoDim_double) {
@@ -131,7 +451,7 @@ TEST(TransposeOpTest, TwoDim_int32) {
                                         2, 5,
                                         3, 6};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals);
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {}, {7, 21});
 }
 
 TEST(TransposeOpTest, TwoDim_int16) {
@@ -147,7 +467,7 @@ TEST(TransposeOpTest, TwoDim_int16) {
       2, 5,
       3, 6};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kOpenVINOExecutionProvider});
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kOpenVINOExecutionProvider}, {7, 21});
 }
 
 TEST(TransposeOpTest, TwoDim_mlfloat16) {
@@ -163,7 +483,7 @@ TEST(TransposeOpTest, TwoDim_mlfloat16) {
        MLFloat16::FromBits(static_cast<uint16_t>(2)), MLFloat16::FromBits(static_cast<uint16_t>(5)),
        MLFloat16::FromBits(static_cast<uint16_t>(3)), MLFloat16::FromBits(static_cast<uint16_t>(6))};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider});
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider}, {7, 21});
 }
 
 #if defined(USE_DNNL)
@@ -264,7 +584,7 @@ TEST(TransposeOpTest, TwoDim_int8) {
                                        2, 5,
                                        3, 6};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider});
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider}, {7, 21});
 }
 
 TEST(TransposeOpTest, TwoDimStr) {
@@ -280,7 +600,7 @@ TEST(TransposeOpTest, TwoDimStr) {
       "2", "5",
       "3", "6"};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals);
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {}, {7, 21});
 }
 
 // Test 3 dimensional transpose, with permutation attribute specified
@@ -319,7 +639,7 @@ TEST(TransposeOpTest, Transpose021) {
       3.3f, 6.3f};
 
   TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals,
-                {kTensorrtExecutionProvider});  // TensorRT: illegal error
+                {kTensorrtExecutionProvider}, {7, 21});  // TensorRT: illegal error
 }
 
 TEST(TransposeOpTest, Transpose120) {
@@ -349,7 +669,7 @@ TEST(TransposeOpTest, Transpose120) {
       6.0f, 6.1f, 6.2f, 6.3f};
 
   TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals,
-                {kTensorrtExecutionProvider});  // TensorRT: illegal error
+                {kTensorrtExecutionProvider}, {7, 21});  // TensorRT: illegal error
 }
 
 // test when the suffix size is > 1 (last dimension is not moved)
@@ -382,7 +702,7 @@ TEST(TransposeOpTest, Transpose102) {
       4.3f, 5.3f, 6.3f};
 
   TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals,
-                {kTensorrtExecutionProvider});  // TensorRT: illegal error
+                {kTensorrtExecutionProvider}, {7, 21});  // TensorRT: illegal error
 }
 
 TEST(TransposeOpTest, TransposeReshape) {
@@ -416,7 +736,7 @@ TEST(TransposeOpTest, TransposeReshape) {
       4.3f, 5.3f, 6.3f};
 
   TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals,
-                {kTensorrtExecutionProvider});  // TensorRT: illegal error
+                {kTensorrtExecutionProvider}, {7, 21});  // TensorRT: illegal error
 }
 
 TEST(TransposeOpTest, ThreeDimStr) {
@@ -453,7 +773,7 @@ TEST(TransposeOpTest, ThreeDimStr) {
       "2", "5",
       "3", "6"};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals);
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {}, {7, 21});
 }
 
 TEST(TransposeOpTest, SixDim) {
@@ -478,7 +798,7 @@ TEST(TransposeOpTest, SixDim) {
   }();
 
   TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals,
-                {kQnnExecutionProvider});  // Error: Failed to finalize QNN graph.
+                {kQnnExecutionProvider}, {7, 21});  // Error: Failed to finalize QNN graph.
 }
 
 template <typename T>
@@ -522,7 +842,7 @@ TEST(TransposeOpTest, NCHW2NHWCStr) {
       "3", "7", "11",
       "4", "8", "12"};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider});
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider}, {7, 21});
 }
 
 template <typename T>
@@ -582,7 +902,7 @@ TEST(TransposeOpTest, NHWC2NCHW_String) {
       "2", "5", "8", "11",
       "3", "6", "9", "12"};
 
-  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider});
+  TransposeTest(input_shape, input_vals, &perm, expected_shape, expected_vals, {kTensorrtExecutionProvider}, {7, 21});
 }
 
 // test to cover memcpy from single axis moving inwards path
@@ -723,11 +1043,9 @@ TEST(TransposeOpTest, DoTransposeEltWise) {
 
 #if USE_CUDA
 constexpr const char* kGpuExecutionProvider = kCudaExecutionProvider;
-#elif USE_ROCM
-constexpr const char* kGpuExecutionProvider = kRocmExecutionProvider;
 #endif
 
-#if defined(USE_CUDA) || defined(USE_ROCM)
+#if defined(USE_CUDA)
 static void TestTranspose(
     const std::vector<int64_t>& perm,
     const std::vector<int64_t>& x_dims,
@@ -819,7 +1137,7 @@ TEST(TransposeOpTest, TransposeBigMLFloat16) {  // Exercises CanUse_cublasTransp
   const std::vector<int64_t> Y_dims{1, 1449, 1449, 3};
   TestTransposeMLFloat16(perm, X_dims, Y_dims);
 }
-#endif  // defined(USE_CUDA) || defined(USE_ROCM)
+#endif  // defined(USE_CUDA)
 
 }  // namespace test
 }  // namespace onnxruntime

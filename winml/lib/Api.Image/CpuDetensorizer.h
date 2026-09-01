@@ -22,7 +22,8 @@ class CpuDetensorizer {
     _Inout_ BYTE* pData
   ) {
 #pragma warning(push)
-#pragma warning(disable : 26014 \
+#pragma warning(  \
+  disable : 26014 \
 )  // warning about possible out of bounds accesing pData, but input is checked for BGRA8 format, so uiCapacity should be in multiples of 4 \
     // output is BGRA8: so blue at i, green is at i + 1, red is at i + 2
 
@@ -36,7 +37,8 @@ class CpuDetensorizer {
 
     auto nominalRangeConverter = NominalRangeConverter(pixelRange);
 
-    if (formatFrom == formatTo && (formatFrom == kImageTensorChannelTypeBGR8 || formatFrom == kImageTensorChannelTypeRGB8)) {
+    if (formatFrom == formatTo &&
+        (formatFrom == kImageTensorChannelTypeBGR8 || formatFrom == kImageTensorChannelTypeRGB8)) {
       for (uint32_t i = 0; i < tensorHeight; i++) {
         BYTE* pPixel = pData;
 
@@ -52,7 +54,8 @@ class CpuDetensorizer {
 
         pData += bufferWidth;
       }
-    } else if ((formatFrom == kImageTensorChannelTypeRGB8 && formatTo == kImageTensorChannelTypeBGR8) || (formatFrom == kImageTensorChannelTypeBGR8 && formatTo == kImageTensorChannelTypeRGB8)) {
+    } else if ((formatFrom == kImageTensorChannelTypeRGB8 && formatTo == kImageTensorChannelTypeBGR8) ||
+               (formatFrom == kImageTensorChannelTypeBGR8 && formatTo == kImageTensorChannelTypeRGB8)) {
       for (uint32_t i = 0; i < tensorHeight; i++) {
         BYTE* pPixel = pData;
 
@@ -68,7 +71,8 @@ class CpuDetensorizer {
 
         pData += bufferWidth;
       }
-    } else if (formatFrom == kImageTensorChannelTypeGRAY8 && (formatTo == kImageTensorChannelTypeBGR8 || formatTo == kImageTensorChannelTypeRGB8)) {
+    } else if (formatFrom == kImageTensorChannelTypeGRAY8 &&
+               (formatTo == kImageTensorChannelTypeBGR8 || formatTo == kImageTensorChannelTypeRGB8)) {
       // just replicate the gray data across each channel
       for (uint32_t i = 0; i < end; i += bufferWidth) {
         for (uint32_t j = i; j < i + bytesPerRow; j += 4) {

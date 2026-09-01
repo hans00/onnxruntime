@@ -18,7 +18,7 @@
 
 namespace onnxruntime {
 #ifdef _WIN32
-std::string ToUTF8String(const std::wstring& s) {
+std::string ToUTF8String(std::wstring_view s) {
   if (s.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))
     ORT_THROW("length overflow");
 
@@ -33,7 +33,7 @@ std::string ToUTF8String(const std::wstring& s) {
   return ret;
 }
 
-std::wstring ToWideString(const std::string& s) {
+std::wstring ToWideString(std::string_view s) {
   if (s.size() >= static_cast<size_t>(std::numeric_limits<int>::max()))
     ORT_THROW("length overflow");
 
@@ -56,7 +56,7 @@ void PrintFinalMessage(const char* msg) {
 #else
   // TODO, consider changing the output of the error message from std::cerr to logging when the
   // exceptions are disabled, since using std::cerr might increase binary size, and std::cerr output
-  // might not be easily accesible on some systems such as mobile
+  // might not be easily accessible on some systems such as mobile
   // TODO, see if we need to change the output of the error message from std::cerr to NSLog for iOS
   std::cerr << msg << std::endl;
 #endif

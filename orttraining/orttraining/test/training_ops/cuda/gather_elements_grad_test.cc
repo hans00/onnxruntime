@@ -8,9 +8,11 @@
 #include "test/common/tensor_op_test_utils.h"
 #include "test/providers/provider_test_utils.h"
 
-#if defined(ENABLE_STRIDED_TENSORS) && (defined(USE_CUDA) || defined(USE_ROCM))
+#if defined(ENABLE_STRIDED_TENSORS) && defined(USE_CUDA)
 #include "test/providers/kernel_compute_test_utils.h"
 #endif
+
+#include "test/common/cuda_op_test_utils.h"
 
 namespace onnxruntime {
 namespace cuda {
@@ -26,6 +28,11 @@ void Add(T* a, const T* b) {
 template <>
 void Add<MLFloat16>(MLFloat16* a, const MLFloat16* b) {
   *a = MLFloat16((*a).ToFloat() + (*b).ToFloat());
+}
+
+template <>
+void Add<BFloat16>(BFloat16* a, const BFloat16* b) {
+  *a = BFloat16((*a).ToFloat() + (*b).ToFloat());
 }
 
 template <typename T, typename TIndex>
@@ -135,7 +142,7 @@ void RunTestWrapper() {
   RunTest<T, int64_t>({2, 1, 1, 2, 3, 2, 3}, {2, 1, 1, 2, 3, 2, 2}, true, -5LL);
 }
 
-#if defined(ENABLE_STRIDED_TENSORS) && (defined(USE_CUDA) || defined(USE_ROCM))
+#if defined(ENABLE_STRIDED_TENSORS) && defined(USE_CUDA)
 template <typename T, typename TIndex>
 void RunKernelComputeTest(std::initializer_list<int64_t> input_dims, std::initializer_list<int64_t> indices_dims,
                           std::initializer_list<int64_t> indices_strides = {}, bool has_axis = false,
@@ -147,8 +154,6 @@ void RunKernelComputeTest(std::initializer_list<int64_t> input_dims, std::initia
   GetData(input_dims, indices_dims, indices_strides, new_axis, dY_data, indices_data, dX_data);
 #ifdef USE_CUDA
   const char* provider = kCudaExecutionProvider;
-#else  // USE_ROCM
-  const char* provider = kRocmExecutionProvider;
 #endif
   onnxruntime::test::KernelComputeTester test("GatherElementsGrad", provider, 1, kMSDomain);
   if (has_axis) test.AddAttribute<int64_t>("axis", axis);
@@ -186,6 +191,21 @@ TEST(GatherElementsGrad, double) { RunTestWrapper<double>(); }
 
 TEST(GatherElementsGrad, MLFloat16) { RunTestWrapper<MLFloat16>(); }
 
+#if defined(USE_CUDA)
+
+TEST(GatherElementsGrad, BFloat16) {
+#ifdef USE_CUDA
+  int min_cuda_architecture = 530;
+  if (!onnxruntime::test::HasCudaEnvironment(min_cuda_architecture)) {
+    LOGS_DEFAULT(WARNING) << "Hardware does not support BFP16";
+    return;
+  }
+#endif
+
+  RunTestWrapper<BFloat16>();
+}
+#endif
+
 TEST(GatherElementsGrad, IndicesUpdatesDontMatch) {
   onnxruntime::test::OpTester test("GatherElementsGrad", 1, kMSDomain);
   test.AddAttribute<int64_t>("axis", 1);
@@ -197,12 +217,24 @@ TEST(GatherElementsGrad, IndicesUpdatesDontMatch) {
   test.Run(onnxruntime::test::OpTester::ExpectResult::kExpectFailure, "");
 }
 
-#if defined(ENABLE_STRIDED_TENSORS) && (defined(USE_CUDA) || defined(USE_ROCM))
+#if defined(ENABLE_STRIDED_TENSORS) && defined(USE_CUDA)
 TEST(GatherElementsGrad, Strided_float) { RunKernelComputeTestWrapper<float>(); }
 
 TEST(GatherElementsGrad, Strided_double) { RunKernelComputeTestWrapper<double>(); }
 
 TEST(GatherElementsGrad, Strided_MLFloat16) { RunKernelComputeTestWrapper<MLFloat16>(); }
+
+TEST(GatherElementsGrad, Strided_BFloat16) {
+#ifdef USE_CUDA
+  int min_cuda_architecture = 530;
+  if (!onnxruntime::test::HasCudaEnvironment(min_cuda_architecture)) {
+    LOGS_DEFAULT(WARNING) << "Hardware does not support BFP16";
+    return;
+  }
+  RunKernelComputeTestWrapper<BFloat16>();
+#endif
+}
+
 #endif
 
 }  // namespace test

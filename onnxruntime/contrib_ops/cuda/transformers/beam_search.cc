@@ -5,8 +5,9 @@
 #include "core/providers/cuda/cuda_execution_provider.h"
 #include "contrib_ops/cuda/transformers/beam_search.h"
 #include "contrib_ops/cuda/transformers/generation_device_helper.h"
-#include "contrib_ops/cuda/transformers/dump_cuda_tensor.h"
+#include "contrib_ops/cuda/utils/dump_cuda_tensor.h"
 
+#if !defined(DISABLE_GENERATION_OPS)
 namespace onnxruntime {
 namespace contrib {
 namespace cuda {
@@ -56,7 +57,7 @@ ONNX_OPERATOR_KERNEL_EX(
                               DataTypeImpl::GetTensorType<MLFloat16>()}),
     WhisperBeamSearch);
 
-transformers::CudaTensorConsoleDumper g_cuda_dumper;
+CudaTensorConsoleDumper g_cuda_dumper;
 
 BeamSearch::BeamSearch(const OpKernelInfo& info)
     : onnxruntime::contrib::transformers::BeamSearch(info) {
@@ -70,9 +71,7 @@ BeamSearch::BeamSearch(const OpKernelInfo& info)
                    GenerationCudaDeviceHelper::InitBeamState<MLFloat16>,
                    GenerationCudaDeviceHelper::CreateBeamScorer);
 
-#ifndef USE_ROCM
   SetDeviceHelpers_Cuda(GenerationCudaDeviceHelper::ReorderPastState, GenerationCudaDeviceHelper::InitCacheIndir);
-#endif
 
   SetDeviceHelpers_Gpt(GenerationCudaDeviceHelper::UpdateGptFeeds<float>,
                        GenerationCudaDeviceHelper::UpdateGptFeeds<MLFloat16>);
@@ -87,12 +86,10 @@ BeamSearch::BeamSearch(const OpKernelInfo& info)
 
   SetConsoleDumper(&g_cuda_dumper);
 
-#ifndef USE_ROCM
   cuda_device_prop_ = &reinterpret_cast<const CUDAExecutionProvider*>(info.GetExecutionProvider())->GetDeviceProp();
 
   cuda_device_arch_ = static_cast<const cudaDeviceProp*>(cuda_device_prop_)->major * 100 +
                       static_cast<const cudaDeviceProp*>(cuda_device_prop_)->minor * 10;
-#endif
 }
 
 Status BeamSearch::ComputeInternal(OpKernelContext* context) const {
@@ -124,9 +121,7 @@ WhisperBeamSearch::WhisperBeamSearch(const OpKernelInfo& info)
                    GenerationCudaDeviceHelper::InitBeamState<MLFloat16>,
                    GenerationCudaDeviceHelper::CreateBeamScorer);
 
-#ifndef USE_ROCM
   SetDeviceHelpers_Cuda(GenerationCudaDeviceHelper::ReorderPastState, GenerationCudaDeviceHelper::InitCacheIndir);
-#endif
 
   SetDeviceHelpers_Gpt(GenerationCudaDeviceHelper::UpdateGptFeeds<float>,
                        GenerationCudaDeviceHelper::UpdateGptFeeds<MLFloat16>);
@@ -141,12 +136,10 @@ WhisperBeamSearch::WhisperBeamSearch(const OpKernelInfo& info)
 
   SetConsoleDumper(&g_cuda_dumper);
 
-#ifndef USE_ROCM
   cuda_device_prop_ = &reinterpret_cast<const CUDAExecutionProvider*>(info.GetExecutionProvider())->GetDeviceProp();
 
   cuda_device_arch_ = static_cast<const cudaDeviceProp*>(cuda_device_prop_)->major * 100 +
                       static_cast<const cudaDeviceProp*>(cuda_device_prop_)->minor * 10;
-#endif
 }
 
 Status WhisperBeamSearch::ComputeInternal(OpKernelContext* context) const {
@@ -169,3 +162,4 @@ Status WhisperBeamSearch::Compute(OpKernelContext* context) const {
 }  // namespace cuda
 }  // namespace contrib
 }  // namespace onnxruntime
+#endif  // !defined(DISABLE_GENERATION_OPS)

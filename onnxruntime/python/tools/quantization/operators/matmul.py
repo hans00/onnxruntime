@@ -2,9 +2,15 @@ import itertools
 import logging
 
 import onnx
-from onnx import onnx_pb as onnx_proto
 
-from ..quant_utils import TENSOR_NAME_QUANT_SUFFIX, QuantizedValue, QuantizedValueType, find_by_name, get_mul_node
+from ..quant_utils import (
+    FLOAT8_TYPES,
+    TENSOR_NAME_QUANT_SUFFIX,
+    QuantizedValue,
+    QuantizedValueType,
+    find_by_name,
+    get_mul_node,
+)
 from .base_operator import QuantOperatorBase
 from .qdq_base_operator import QDQOperatorBase
 
@@ -172,17 +178,7 @@ class QLinearMatMul(QOpMatMul):
         qlinear_matmul_inputs.append(output_scale_name)
         qlinear_matmul_inputs.append(output_zp_name)
 
-        domain = (
-            "com.microsoft"
-            if self.quantizer.weight_qType
-            in {
-                onnx_proto.TensorProto.FLOAT8E4M3FN,
-                onnx_proto.TensorProto.FLOAT8E4M3FNUZ,
-                onnx_proto.TensorProto.FLOAT8E5M2,
-                onnx_proto.TensorProto.FLOAT8E5M2FNUZ,
-            }
-            else ""
-        )
+        domain = "com.microsoft" if self.quantizer.weight_qType in FLOAT8_TYPES else ""
         qlinear_matmul_node = onnx.helper.make_node(
             "QLinearMatMul",
             qlinear_matmul_inputs,
@@ -219,9 +215,13 @@ class QDQMatMul(QDQOperatorBase):
             nodes_to_iterate = itertools.chain(node.input, node.output)
 
         for tensor_name in nodes_to_iterate:
-            # only support per-channel quantization on weight
-            if self.quantizer.is_per_channel() and find_by_name(tensor_name, self.quantizer.model.initializer()):
-                channel_axis = self.quantizer.qdq_op_type_per_channel_support_to_axis.get(node.op_type, 1)
-                self.quantizer.quantize_weight_tensor_per_channel(tensor_name, channel_axis)
+            if find_by_name(tensor_name, self.quantizer.model.initializer()):
+                is_per_channel, channel_axis = self.quantizer.is_tensor_per_channel(
+                    tensor_name, default_axis=1, op_type=node.op_type
+                )
+                if is_per_channel:
+                    self.quantizer.quantize_weight_tensor_per_channel(tensor_name, channel_axis)
+                else:
+                    self.quantizer.quantize_weight_tensor(tensor_name)
             else:
                 self.quantizer.quantize_activation_tensor(tensor_name)

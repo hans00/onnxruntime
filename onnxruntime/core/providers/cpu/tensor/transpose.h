@@ -10,7 +10,7 @@
 #include "core/framework/op_kernel.h"
 #endif
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include <sstream>
 
 namespace onnxruntime {
@@ -33,12 +33,14 @@ class TransposeBase {
   Both Tensors must have the same data type. `input_shape_override` overrides the shape of `input` for compute purposes.
   */
   static Status DoTranspose(const gsl::span<const size_t>& permutations, const Tensor& input, Tensor& output,
-                            const TensorShape* input_shape_override = nullptr);
+                            const TensorShape* input_shape_override = nullptr,
+                            concurrency::ThreadPool* tp = nullptr);
 
  protected:
-  TransposeBase(const OpKernelInfo& info) {
+  template <typename KernelInfoType>
+  TransposeBase(const KernelInfoType& info) {
     std::vector<int64_t> temp_perm;
-    Status status = info.GetAttrs<int64_t>("perm", temp_perm);
+    Status status = info.template GetAttrs<int64_t>("perm", temp_perm);
     if (status.IsOK()) {
       size_t rank = temp_perm.size();
       perm_.resize(temp_perm.size());

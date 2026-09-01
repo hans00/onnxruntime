@@ -5,6 +5,11 @@
 
 #include "core/providers/cuda/cuda_kernel.h"
 
+#if defined(ORT_USE_NCCL) || defined(USE_MPI)
+#include "custom_reduce_impl.h"
+#include "ipc_utils.h"
+#endif
+
 #if defined(ORT_USE_NCCL)
 #include <algorithm>
 #include <optional>
@@ -99,6 +104,15 @@ Status FuncAllReduce(
     cudaStream_t stream,
     const Tensor* input,
     Tensor* output);
+
+Status FuncCustomAllReduce(
+    NcclContext* nccl,
+    cudaStream_t stream,
+    const void* input_data,
+    void* output_data,
+    int64_t input_count,
+    onnxruntime::MLDataType data_type,
+    onnxruntime::cuda::collective::IPCMemoryResourcePack& ipc_mem_res_pack);
 
 void FuncAllGather(
     const NcclKernel* nccl_kernel,

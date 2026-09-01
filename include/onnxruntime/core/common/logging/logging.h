@@ -14,11 +14,9 @@
 #include "core/common/common.h"
 #include "core/common/profiler_common.h"
 #include "core/common/logging/capture.h"
-#include "core/common/logging/severity.h"
-
 #include "core/common/logging/macros.h"
-
-#include "date/date.h"
+#include "core/common/logging/severity.h"
+#include "core/common/logging/sink_types.h"
 
 /*
 
@@ -52,20 +50,43 @@
 
 */
 
-namespace onnxruntime {
+struct OrtLogger;  // opaque API type. is always an instance of Logger
 
+namespace onnxruntime {
 namespace logging {
 
-using Timestamp = std::chrono::time_point<std::chrono::system_clock>;
+// This class wraps `std::chrono::system_clock::time_point` and provides `operator<<`.
+// It is a workaround for the inconsistent availability of `std::chrono::operator<<` for
+// `std::chrono::system_clock::time_point`.
+// TODO When all builds support `std::chrono::operator<<`, we can simply use `std::chrono::system_clock::time_point`:
+//   `using Timestamp = std::chrono::system_clock::time_point;`
+class Timestamp {
+ public:
+  using TimePoint = std::chrono::system_clock::time_point;
 
-// TODO: When other compilers support std::chrono::operator<<, update this.
-// TODO: Check support for other compilers' version before enable C++20 for other compilers.
-// Xcode added support for C++20's std::chrono::operator<< in SDK version 14.4.
-#if __cplusplus >= 202002L && __MAC_OS_X_VERSION_MAX_ALLOWED >= 140400L
-namespace timestamp_ns = std::chrono;
-#else
-namespace timestamp_ns = ::date;
-#endif
+  // This constructor is intentionally not `explicit` to allow implicit conversion from
+  // `std::chrono::system_clock::time_point`, a.k.a., `TimePoint`.
+  // The hope is that eventually we can replace the `Timestamp` class with an alias to `TimePoint`.
+  Timestamp(const TimePoint& time_point) noexcept : time_point_{time_point} {}
+
+  // Partial implementation of `std::chrono::system_clock::time_point` interface.
+
+  using duration = TimePoint::duration;
+
+  friend std::ostream& operator<<(std::ostream& os, const Timestamp& time_stamp) {
+    return time_stamp.WriteToStream(os);
+  }
+
+  friend std::wostream& operator<<(std::wostream& os, const Timestamp& time_stamp) {
+    return time_stamp.WriteToWStream(os);
+  }
+
+ private:
+  std::ostream& WriteToStream(std::ostream& os) const;
+  std::wostream& WriteToWStream(std::wostream& os) const;
+
+  TimePoint time_point_{};
+};
 
 #ifndef NDEBUG
 ORT_ATTRIBUTE_UNUSED static bool vlog_enabled = true;  // Set directly based on your needs.
@@ -168,6 +189,23 @@ class LoggingManager final {
   static bool HasDefaultLogger() { return nullptr != s_default_logger_; }
 
   /**
+    Gets the default instance of the LoggingManager.
+  */
+  static LoggingManager* GetDefaultInstance();
+
+  /**
+     Removes a Sink if one is present
+  */
+  void RemoveSink(SinkType sinkType);
+
+  /**
+     Adds a Sink to the current sink creating a CompositeSink if necessary
+     Sinks types must be unique
+     @param severity The severity level for the new Sink
+  */
+  bool AddSinkOfType(SinkType sinkType, std::function<std::unique_ptr<ISink>()> sinkFactory, logging::Severity severity);
+
+  /**
      Change the minimum severity level for log messages to be output by the default logger.
      @param severity The severity.
   */
@@ -214,7 +252,10 @@ class LoggingManager final {
   void CreateDefaultLogger(const std::string& logger_id);
 
   std::unique_ptr<ISink> sink_;
-  const Severity default_min_severity_;
+#ifdef _WIN32
+  mutable std::mutex sink_mutex_;
+#endif
+  Severity default_min_severity_;
   const bool default_filter_user_data_;
   const int default_max_vlog_level_;
   bool owns_default_logger_;
@@ -306,6 +347,10 @@ class Logger {
     logging_manager_->SendProfileEvent(eventRecord);
   }
 
+  // convert to API type for custom ops and plugin EPs
+  OrtLogger* ToExternal() { return reinterpret_cast<OrtLogger*>(this); }
+  const OrtLogger* ToExternal() const { return reinterpret_cast<const OrtLogger*>(this); }
+
  private:
   const LoggingManager* logging_manager_;
   const std::string id_;
@@ -345,7 +390,7 @@ inline Timestamp LoggingManager::GetTimestamp() const noexcept {
   static const Epochs& epochs = GetEpochs();
 
   const auto high_res_now = std::chrono::high_resolution_clock::now();
-  return std::chrono::time_point_cast<std::chrono::system_clock::duration>(
+  return std::chrono::time_point_cast<Timestamp::duration>(
       epochs.system + (high_res_now - epochs.high_res) + epochs.localtime_offset_from_utc);
 }
 
@@ -362,8 +407,8 @@ unsigned int GetProcessId();
 /**
    If the ONNXRuntimeTraceLoggingProvider ETW Provider is enabled, then adds to the existing logger.
 */
-std::unique_ptr<ISink> EnhanceLoggerWithEtw(std::unique_ptr<ISink> existingLogger, logging::Severity originalSeverity,
-                                            logging::Severity etwSeverity);
+std::unique_ptr<ISink> EnhanceSinkWithEtw(std::unique_ptr<ISink> existingSink, logging::Severity originalSeverity,
+                                          logging::Severity etwSeverity);
 
 /**
   If the ONNXRuntimeTraceLoggingProvider ETW Provider is enabled, then can override the logging level.

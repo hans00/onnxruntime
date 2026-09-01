@@ -83,7 +83,7 @@ void TryToLoadKernel() {
   // get all kernel symbols from curret lib.so
   size_t size = sizeof(kernel_infos) / sizeof(kernel_infos[0]);
 
-  for (int i = 0; i < size; ++i) {
+  for (size_t i = 0; i < size; ++i) {
     auto k_i = kernel_infos[i];
 
     void* buff;
@@ -129,8 +129,6 @@ void LoadOrtTritonKernel() {
   // load kernel should be called only once
   std::call_once(load_ort_triton_kernel_flag, TryToLoadKernel);
 }
-
-
 
 #ifdef USE_TRITON_KERNEL
 Status LaunchTritonKernel(cudaStream_t stream, size_t idx, int grid0, int grid1, int grid2,
@@ -194,7 +192,6 @@ Status LaunchTritonKernel(cudaStream_t /*stream*/, size_t /*idx*/, int /*grid0*/
   return Status::OK();
 }
 #endif
-
 
 const TritonKernelMetaData* GetOrtTritonKernelMetadata(size_t idx) {
   if (idx >= ort_triton_kernel_metadata.size()) {

@@ -82,6 +82,7 @@ struct Tensorrt_Provider : Provider {
     info.min_subgraph_size = options.trt_min_subgraph_size;
     info.max_workspace_size = options.trt_max_workspace_size;
     info.fp16_enable = options.trt_fp16_enable != 0;
+    info.bf16_enable = options.trt_bf16_enable != 0;
     info.int8_enable = options.trt_int8_enable != 0;
     info.int8_calibration_table_name = options.trt_int8_calibration_table_name == nullptr ? "" : options.trt_int8_calibration_table_name;
     info.int8_use_native_calibration_table = options.trt_int8_use_native_calibration_table != 0;
@@ -90,6 +91,8 @@ struct Tensorrt_Provider : Provider {
     info.dump_subgraphs = options.trt_dump_subgraphs != 0;
     info.engine_cache_enable = options.trt_engine_cache_enable != 0;
     info.engine_cache_path = options.trt_engine_cache_path == nullptr ? "" : options.trt_engine_cache_path;
+    info.weight_stripped_engine_enable = options.trt_weight_stripped_engine_enable != 0;
+    info.onnx_model_folder_path = options.trt_onnx_model_folder_path == nullptr ? "" : options.trt_onnx_model_folder_path;
     info.engine_decryption_enable = options.trt_engine_decryption_enable != 0;
     info.engine_decryption_lib_path = options.trt_engine_decryption_lib_path == nullptr ? "" : options.trt_engine_decryption_lib_path;
     info.force_sequential_engine_build = options.trt_force_sequential_engine_build != 0;
@@ -113,6 +116,14 @@ struct Tensorrt_Provider : Provider {
     info.ep_context_file_path = options.trt_ep_context_file_path == nullptr ? "" : options.trt_ep_context_file_path;
     info.ep_context_embed_mode = options.trt_ep_context_embed_mode;
     info.engine_cache_prefix = options.trt_engine_cache_prefix == nullptr ? "" : options.trt_engine_cache_prefix;
+    info.engine_hw_compatible = options.trt_engine_hw_compatible != 0;
+    info.onnx_bytestream = options.trt_onnx_bytestream;
+    info.onnx_bytestream_size = options.trt_onnx_bytestream_size;
+    info.external_data_bytestream = options.trt_external_data_bytestream;
+    info.external_data_bytestream_size = options.trt_external_data_bytestream_size;
+    info.op_types_to_exclude = options.trt_op_types_to_exclude == nullptr ? "" : options.trt_op_types_to_exclude;
+    info.preview_features = options.trt_preview_features == nullptr ? "" : options.trt_preview_features;
+    info.load_user_initializer = options.trt_load_user_initializer != 0;
 
     return std::make_shared<TensorrtProviderFactory>(info);
   }

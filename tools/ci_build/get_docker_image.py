@@ -71,11 +71,14 @@ def main():
 
     log.info(f"Image: {full_image_name}")
 
-    dst_deps_file = Path(args.context) / "scripts" / "deps.txt"
+    dst_scripts_dir = Path(args.context) / "scripts"
+    dst_deps_file = dst_scripts_dir / "deps.txt"
     # The docker file may provide a special deps.txt in its docker context dir and uses that one.
     # Otherwise, copy a generic one from this repo's cmake dir.
     if not dst_deps_file.exists():
         log.info(f"Copy deps.txt to : {dst_deps_file}")
+        if not dst_scripts_dir.exists():
+            dst_scripts_dir.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(Path(REPO_DIR) / "cmake" / "deps.txt", str(dst_deps_file))
 
     if "manylinux" in args.dockerfile and args.multiple_repos:
@@ -104,11 +107,10 @@ def main():
             "error",
             "buildx",
             "build",
-            "--push",
+            "--load",
             "--tag",
             full_image_name,
-            "--cache-from",
-            full_image_name,
+            "--cache-from=type=registry,ref=" + full_image_name,
             "--build-arg",
             "BUILDKIT_INLINE_CACHE=1",
             *shlex.split(args.docker_build_args),
@@ -116,24 +118,10 @@ def main():
             args.dockerfile,
             args.context,
         )
-    elif args.use_imagecache:
-        log.info("Building image with pipeline cache...")
         run(
             args.docker_path,
-            "--log-level",
-            "error",
-            "buildx",
-            "build",
-            "--tag",
+            "push",
             full_image_name,
-            "--cache-from",
-            full_image_name,
-            "--build-arg",
-            "BUILDKIT_INLINE_CACHE=1",
-            *shlex.split(args.docker_build_args),
-            "-f",
-            args.dockerfile,
-            args.context,
         )
     else:
         log.info("Building image...")

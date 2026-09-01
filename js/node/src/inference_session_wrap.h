@@ -10,16 +10,29 @@
 
 // class InferenceSessionWrap is a N-API object wrapper for native InferenceSession.
 class InferenceSessionWrap : public Napi::ObjectWrap<InferenceSessionWrap> {
-public:
+ public:
   static Napi::Object Init(Napi::Env env, Napi::Object exports);
-  InferenceSessionWrap(const Napi::CallbackInfo &info);
 
-private:
+  InferenceSessionWrap(const Napi::CallbackInfo& info);
+  ~InferenceSessionWrap();
+
+ private:
+  /**
+   * [sync] initialize ONNX Runtime once.
+   *
+   * This function must be called before any other functions.
+   *
+   * @param arg0 a number specifying the log level.
+   *
+   * @returns undefined
+   */
+  static Napi::Value InitOrtOnce(const Napi::CallbackInfo& info);
+
   /**
    * [sync] list supported backend list
    * @returns array with objects { "name": "cpu", requirementsInstalled: true }
    */
-  static Napi::Value ListSupportedBackends(const Napi::CallbackInfo &info);
+  static Napi::Value ListSupportedBackends(const Napi::CallbackInfo& info);
 
   /**
    * [sync] create the session.
@@ -27,24 +40,17 @@ private:
    * @returns nothing
    * @throw error if status code != 0
    */
-  Napi::Value LoadModel(const Napi::CallbackInfo &info);
+  Napi::Value LoadModel(const Napi::CallbackInfo& info);
 
   // following functions have to be called after model is loaded.
 
   /**
-   * [sync] get input names.
+   * [sync] get metadata of the model's inputs or outputs.
    * @param nothing
-   * @returns a string array.
+   * @returns an array of objects with keys: name, isTensor, type, symbolicDimensions, shape
    * @throw nothing
    */
-  Napi::Value GetInputNames(const Napi::CallbackInfo &info);
-  /**
-   * [sync] get output names.
-   * @param nothing
-   * @returns a string array.
-   * @throw nothing
-   */
-  Napi::Value GetOutputNames(const Napi::CallbackInfo &info);
+  Napi::Value GetMetadata(const Napi::CallbackInfo& info);
 
   /**
    * [sync] run the model.
@@ -53,7 +59,7 @@ private:
    * @returns an object that every output specified will present and value must be object
    * @throw error if status code != 0
    */
-  Napi::Value Run(const Napi::CallbackInfo &info);
+  Napi::Value Run(const Napi::CallbackInfo& info);
 
   /**
    * [sync] dispose the session.
@@ -61,24 +67,30 @@ private:
    * @returns nothing
    * @throw nothing
    */
-  Napi::Value Dispose(const Napi::CallbackInfo &info);
+  Napi::Value Dispose(const Napi::CallbackInfo& info);
+
+  /**
+   * [sync] end the profiling.
+   * @param nothing
+   * @returns nothing
+   * @throw nothing
+   */
+  Napi::Value EndProfiling(const Napi::CallbackInfo& info);
 
   // private members
-
-  // persistent constructor
-  static Napi::FunctionReference constructor;
 
   // session objects
   bool initialized_;
   bool disposed_;
   std::unique_ptr<Ort::Session> session_;
-  std::unique_ptr<Ort::RunOptions> defaultRunOptions_;
 
   // input/output metadata
   std::vector<std::string> inputNames_;
-  std::vector<ONNXType> inputTypes_;
-  std::vector<ONNXTensorElementDataType> inputTensorElementDataTypes_;
+  std::vector<Ort::TypeInfo> inputTypes_;
   std::vector<std::string> outputNames_;
-  std::vector<ONNXType> outputTypes_;
-  std::vector<ONNXTensorElementDataType> outputTensorElementDataTypes_;
+  std::vector<Ort::TypeInfo> outputTypes_;
+
+  // preferred output locations
+  std::vector<int> preferredOutputLocations_;
+  std::unique_ptr<Ort::IoBinding> ioBinding_;
 };

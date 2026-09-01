@@ -3,13 +3,13 @@
 # Licensed under the MIT License.
 # --------------------------------------------------------------------------
 
-from typing import Callable
+import os
+from collections.abc import Callable
 
 import torch
 import torch.onnx.symbolic_helper as sym_help
 from packaging import version
 from packaging.version import Version
-from torch.onnx import register_custom_op_symbolic
 from torch.onnx.symbolic_helper import parse_args
 
 from onnxruntime.training.utils import pytorch_type_to_onnx_dtype
@@ -37,7 +37,7 @@ def wrap_custom_export_function(original_func: Callable) -> Callable:
     runtime_pytorch_version = get_runtime_pytorch_version()
 
     if runtime_pytorch_version >= version.parse("1.13"):
-        from torch.onnx._internal import jit_utils
+        from torch.onnx._internal import jit_utils  # noqa: PLC0415
 
         def _export_with_ctx(graph_context: jit_utils.GraphContext, *args, **kwargs):
             return original_func(graph_context, graph_context.original_node, *args, **kwargs)
@@ -45,7 +45,7 @@ def wrap_custom_export_function(original_func: Callable) -> Callable:
         return _export_with_ctx
 
     elif runtime_pytorch_version >= version.parse("1.11"):
-        from torch.onnx import SymbolicContext
+        from torch.onnx import SymbolicContext  # noqa: PLC0415
 
         def _export_with_ctx(ctx: SymbolicContext, graph, *args, **kwargs):
             node = ctx.cur_node
@@ -69,6 +69,8 @@ class CustomOpSymbolicRegistry:
 
     @classmethod
     def register_all(cls, onnx_opset_version):
+        from torch.onnx import register_custom_op_symbolic  # noqa: PLC0415
+
         for name, fn in cls._SYMBOLICS.items():
             # Symbolic name is in format: domain::name
             register_custom_op_symbolic(
@@ -295,7 +297,7 @@ def numpy_T(g, self):  # noqa: N802
 def squeeze(g, self, dim=None):
     # Current _infer_If does not correctly infer shapes from its then- and else- branches, and will
     # cause error in shape inference of following nodes, here we choose to export it as `Squeeze.`
-    from torch.onnx.symbolic_opset11 import squeeze as squeeze_with_if
+    from torch.onnx.symbolic_opset11 import squeeze as squeeze_with_if  # noqa: PLC0415
 
     if dim is None:
         return squeeze_with_if(g, self, dim)
@@ -437,7 +439,7 @@ def permute_and_reshape_tensor(
     shape_tensor,
 ):
     # If matmul_output_axes and contraction_axes are contiguous in input tensor,
-    # we can move Reshape to before Transpose, so it's possible that the Transpoase is fused to MatMul.
+    # we can move Reshape to before Transpose, so it's possible that the Transpose is fused to MatMul.
     # Otherwise, we have to Transpose first to move those axes together and then Reshape.
     is_matmul_output_axes_contiguous = is_axes_contiguous(matmul_output_axes)
     is_contraction_axes_contiguous = is_axes_contiguous(contraction_axes)
@@ -452,7 +454,7 @@ def permute_and_reshape_tensor(
             if need_permute(perm):
                 new_tensor = sym_help._unsqueeze_helper(g, tensor, [-1])
                 pos = batch_length if is_lhs else len(perm)
-                perm = perm[:pos] + [len(perm)] + perm[pos:]
+                perm = perm[:pos] + [len(perm)] + perm[pos:]  # noqa: RUF005
                 new_tensor = g.op("Transpose", new_tensor, perm_i=perm)
             else:
                 new_tensor = sym_help._unsqueeze_helper(g, tensor, [batch_length if is_lhs else -1])
@@ -496,7 +498,7 @@ def permute_and_reshape_tensor(
             if not matmul_output_axes:
                 shape_tensors.append(g.op("Constant", value_t=torch.tensor([1], dtype=torch.int64)))
                 pos = batch_length if is_lhs else len(perm)
-                perm = perm[:pos] + [new_axis] + perm[pos:]
+                perm = perm[:pos] + [new_axis] + perm[pos:]  # noqa: RUF005
             new_tensor = reshape_tensor(g, tensor, shape_tensors)
             if need_permute(perm):
                 new_tensor = g.op("Transpose", new_tensor, perm_i=perm)
@@ -525,7 +527,7 @@ def permute_and_reshape_tensor(
 
 @register_symbolic("einsum", torch_version_end="1.13.0")
 @parse_args("s", "v")
-def einsum_pre_troch_113(g, equation, tensor_list):
+def einsum_pre_torch_113(g, equation, tensor_list):
     return einsum_internal(g, equation, tensor_list)
 
 
@@ -540,12 +542,12 @@ def einsum_internal(g, equation, tensor_list):
     num_ops = len(tensors)
     assert num_ops > 0
 
-    # Doesn't support implicit output is ellipsis or more than 2 oprands for now.
-    # Doesn't support ellipsis ('...') for now as not easy to get sizes of oprands.
+    # Doesn't support implicit output is ellipsis or more than 2 operands for now.
+    # Doesn't support ellipsis ('...') for now as not easy to get sizes of operands.
     if num_ops != 2 or equation.find("->") == -1 or "." in equation:
         return g.op("Einsum", *tensors, equation_s=equation)
 
-    # Take "ks,ksm->sm" as example. After prcoess inputs,
+    # Take "ks,ksm->sm" as example. After process inputs,
     # lhs_labels = [k,s], rhs_labels = [k,s,m], result_labels = [s,m].
     lhs_labels, rhs_labels, result_labels = parse_equation(equation)
 
@@ -606,7 +608,7 @@ def einsum_internal(g, equation, tensor_list):
     # contraction_labels = [k], contraction_axes = [2] for the example.
     batched_axes = []
     matmul_output_axes = []
-    contraction_axes = [axis for axis in range(out_size, perm_size)]
+    contraction_axes = list(range(out_size, perm_size))
     for axis in range(out_size):
         label = result_labels[axis]
         if label in lhs_labels and label in rhs_labels:
@@ -759,7 +761,7 @@ def group_norm(g, input, num_groups, weight, bias, eps, cudnn_enabled):
     # Torch's group_norm's weight and bias are optional, its gradient has a bool[3] augment to indicate
     # whether to compute the gradient for input, weight, bias. For simplicity of the gradient graph builder,
     # we support only the case that weight and bias are not None.
-    from torch.onnx.symbolic_opset9 import group_norm as group_norm_generic
+    from torch.onnx.symbolic_opset9 import group_norm as group_norm_generic  # noqa: PLC0415
 
     if weight is None or sym_help._is_none(weight) or bias is None or sym_help._is_none(bias):
         return group_norm_generic(g, input, num_groups, weight, bias, eps, cudnn_enabled)
@@ -847,6 +849,103 @@ def layer_norm(g, input, normalized_shape, weight, bias, eps, cudnn_enable):
     return res
 
 
+# Adapted from torch.onnx.symbolic_opset9._convolution -
+# https://github.com/pytorch/pytorch/blob/cf06189a2d2785ac493bcd0d55e520af5a0e3b97/torch/onnx/symbolic_opset9.py#L2334
+# We override aten::_convolution here to support bf16 for phimm model from GenAI team.
+# For bf16 inputs, we will convert input to float32, do convolution then convert output back to bf16.
+# TODO: This might have negative impact on performance.
+@register_symbolic("_convolution")
+@parse_args("v", "v", "v", "is", "is", "is", "i", "is", "i", "i", "i", "i", "i")
+def convolution(
+    g,
+    input,
+    weight,
+    bias,
+    stride,
+    padding,
+    dilation,
+    transposed,
+    output_padding,
+    groups,
+    benchmark,
+    deterministic,
+    cudnn_enabled,
+    allow_tf32=None,
+):
+    from torch.onnx.symbolic_opset9 import _convolution  # noqa: PLC0415
+
+    input_casted = (
+        g.op("Cast", input, to_i=torch.onnx.TensorProtoDataType.FLOAT)
+        if input.type().scalarType() == "BFloat16"
+        else input
+    )
+    weight_casted = (
+        g.op("Cast", weight, to_i=torch.onnx.TensorProtoDataType.FLOAT)
+        if weight.type().scalarType() == "BFloat16"
+        else weight
+    )
+
+    n = _convolution(
+        g,
+        input_casted,
+        weight_casted,
+        bias,
+        stride,
+        padding,
+        dilation,
+        transposed,
+        output_padding,
+        groups,
+        benchmark,
+        deterministic,
+        cudnn_enabled,
+        allow_tf32,
+    )
+
+    n_casted = (
+        g.op("Cast", n, to_i=torch.onnx.TensorProtoDataType.BFLOAT16) if input.type().scalarType() == "BFloat16" else n
+    )
+    return n_casted
+
+
+# Adapted from torch.onnx.symbolic_opset9._convolution_mode -
+# https://github.com/pytorch/pytorch/blob/cf06189a2d2785ac493bcd0d55e520af5a0e3b97/torch/onnx/symbolic_opset9.py#L2406
+# We override aten::_convolution_mode here to support bf16 for phimm model from GenAI team.
+# For bf16 inputs, we will convert input to float32, do convolution then convert output back to bf16.
+# TODO: This might have negative impact on performance.
+@register_symbolic("_convolution_mode")
+@parse_args("v", "v", "v", "is", "s", "is", "i")
+def convolution_mode(
+    g,
+    input,
+    weight,
+    bias,
+    stride,
+    padding,
+    dilation,
+    groups,
+):
+    from torch.onnx.symbolic_opset9 import _convolution_mode  # noqa: PLC0415
+
+    input_casted = (
+        g.op("Cast", input, to_i=torch.onnx.TensorProtoDataType.FLOAT)
+        if input.type().scalarType() == "BFloat16"
+        else input
+    )
+    weight_casted = (
+        g.op("Cast", weight, to_i=torch.onnx.TensorProtoDataType.FLOAT)
+        if weight.type().scalarType() == "BFloat16"
+        else weight
+    )
+
+    n = _convolution_mode(g, input_casted, weight_casted, bias, stride, padding, dilation, groups)
+
+    n_casted = (
+        g.op("Cast", n, to_i=torch.onnx.TensorProtoDataType.BFLOAT16) if input.type().scalarType() == "BFloat16" else n
+    )
+    return n_casted
+
+
 # Adapted from torch.onnx.symbolic_opset13.softmax -
 # https://github.com/pytorch/pytorch/blob/cf06189a2d2785ac493bcd0d55e520af5a0e3b97/torch/onnx/symbolic_opset13.py#L27
 # We don't need overloads symbolic_opset9 because training support opsets >= 13.
@@ -861,7 +960,7 @@ def layer_norm(g, input, normalized_shape, weight, bias, eps, cudnn_enable):
 @register_symbolic("softmax")
 @parse_args("v", "i", "none")
 def softmax(g, input, dim, dtype=None):
-    from torch.onnx import _type_utils
+    from torch.onnx import _type_utils  # noqa: PLC0415
 
     casted_input = input
     need_cast_for_compute = dtype and dtype.node().kind() != "prim::Constant"
@@ -872,3 +971,26 @@ def softmax(g, input, dim, dtype=None):
     softmax = g.op("Softmax", casted_input, axis_i=dim)
 
     return softmax
+
+
+ATEN_SDPA_FALLBACK = os.getenv("ORTMODULE_ATEN_SDPA_FALLBACK", None)
+if ATEN_SDPA_FALLBACK:
+    # based on the following internal PyTorch kernel for efficient attention:
+    # https://github.com/pytorch/pytorch/blob/c12a4f2e65ad41b739aab1a261e2336b4a79fcfb/aten/src/ATen/native/native_functions.yaml#L14778
+    @register_symbolic("scaled_dot_product_attention")
+    def scaled_dot_product_attention(g, query, key, value, attn_mask=None, dropout_p=0.0, is_causal=False, scale=None):
+        dropout_p_f = g.op("Cast", dropout_p, to_i=torch.onnx.TensorProtoDataType.FLOAT)
+        compute_logsumexp = g.op("Constant", value_t=torch.tensor([1], dtype=torch.bool))
+        return g.op(
+            "org.pytorch.aten::ATen",
+            query,
+            key,
+            value,
+            attn_mask,
+            compute_logsumexp,
+            dropout_p_f,
+            is_causal,
+            scale,
+            operator_s="_scaled_dot_product_efficient_attention",
+            outputs=4,
+        )[0]

@@ -11,7 +11,7 @@
 #pragma warning(disable : 4996)
 #endif
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -135,10 +135,6 @@ static Status ReverseSequenceImpl(const Tensor& X,
 
   for (int i = 0; i < batch_size; i++) {
     int64_t seq_len = sequence_lengths[i];
-
-    if (seq_len == 0) {
-      continue;
-    }
 
     if (seq_len > max_seq_len || seq_len < 0) {
       return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Invalid sequence length: ", seq_len,

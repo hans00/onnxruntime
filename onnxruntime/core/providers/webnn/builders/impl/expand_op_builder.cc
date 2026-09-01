@@ -2,7 +2,6 @@
 // Copyright (c) Intel Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/common/safeint.h"
 #include "core/framework/tensorprotoutils.h"
 #include "core/optimizer/initializer.h"
 #include "core/providers/common.h"
@@ -28,7 +27,7 @@ class ExpandOpBuilder : public BaseOpBuilder {
 
   // Operator support related.
  private:
-  bool IsOpSupportedImpl(const InitializedTensorSet& initializers, const Node& node,
+  bool IsOpSupportedImpl(const GraphViewer& graph_viewer, const Node& node,
                          const WebnnDeviceType /* device_type */, const logging::Logger& logger) const override;
 };
 
@@ -44,43 +43,53 @@ Status ExpandOpBuilder::AddToModelBuilderImpl(ModelBuilder& model_builder,
   const auto& input_defs = node.InputDefs();
   const auto& initializers(model_builder.GetInitializerTensors());
   const auto& shape_tensor = *initializers.at(input_defs[1]->Name());
-  std::vector<int32_t> new_shape;
-  ORT_RETURN_IF_NOT(ReadIntArrayFrom1DTensor(shape_tensor, new_shape, logger), "Cannot get shape.");
+  std::vector<int64_t> new_shape;
+  ORT_RETURN_IF_NOT(ReadIntArrayFrom1DTensor(shape_tensor, new_shape, model_builder.GetGraphViewer(), logger),
+                    "Cannot get shape.");
   emscripten::val input = model_builder.GetOperand(input_defs[0]->Name());
   std::vector<int64_t> input_shape;
   ORT_RETURN_IF_NOT(GetShape(*input_defs[0], input_shape, logger), "Cannot get input's shape.");
-  if (new_shape.size() < input_shape.size()) {
-    // Enlarge new shape to input.rank, right aligned with leading ones
-    new_shape.insert(new_shape.begin(), input_shape.size() - new_shape.size(), 1);
-  }
-  emscripten::val output =
-      model_builder.GetBuilder().call<emscripten::val>("expand",
-                                                       input, emscripten::val::array(new_shape));
+
+  std::vector<int64_t> output_shape;
+  ORT_RETURN_IF_NOT(GetBidirectionalBroadcastShape(input_shape, new_shape, output_shape), "Cannot get output shape.");
+
+  emscripten::val options = emscripten::val::object();
+  options.set("label", node.Name());
+
+  emscripten::val output_shape_arr = emscripten::val::array(GetNarrowedIntFromInt64<uint32_t>(output_shape));
+  emscripten::val output = model_builder.GetBuilder().call<emscripten::val>("expand", input, output_shape_arr, options);
   model_builder.AddOperand(node.OutputDefs()[0]->Name(), std::move(output));
   return Status::OK();
 }
 
 // Operator support related.
 
-bool ExpandOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers,
+bool ExpandOpBuilder::IsOpSupportedImpl(const GraphViewer& graph_viewer,
                                         const Node& node,
                                         const WebnnDeviceType /* device_type */,
                                         const logging::Logger& logger) const {
   const auto& input_defs = node.InputDefs();
   const auto& shape_name = input_defs[1]->Name();
-  if (!Contains(initializers, shape_name)) {
+
+  // We need a constant which can not be overriden by input
+  const auto* shape_init = graph_viewer.GetConstantInitializer(shape_name);
+  if (!shape_init) {
     LOGS(logger, VERBOSE) << "The shape must be a constant initializer.";
     return false;
   }
 
-  std::vector<int64_t> new_shape;
-  const auto& shape_tensor = *initializers.at(shape_name);
+  const auto& shape_tensor = *shape_init;
   if (shape_tensor.data_type() != ONNXTensorElementDataType::ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64) {
     LOGS(logger, VERBOSE) << "The type of tensor's element data must be INT64.";
     return false;
   }
-  if (!ReadIntArrayFrom1DTensor(shape_tensor, new_shape, logger)) {
-    LOGS(logger, VERBOSE) << "Cannot get shape.";
+
+  std::vector<int64_t> new_shape;
+  if (!ReadIntArrayFrom1DTensor(shape_tensor, new_shape, graph_viewer, logger)) {
+    return false;
+  }
+  if (std::any_of(new_shape.begin(), new_shape.end(), [](int64_t dimension) { return dimension == 0; })) {
+    LOGS(logger, VERBOSE) << "WebNN expand does not support new shape with 0 dimension.";
     return false;
   }
 
@@ -90,16 +99,8 @@ bool ExpandOpBuilder::IsOpSupportedImpl(const InitializedTensorSet& initializers
     return false;
   }
 
-  if (input_shape.empty()) {
-    LOGS(logger, VERBOSE) << "Expand does not support empty input's shape.";
-    return false;
-  }
-
-  if (new_shape.size() > input_shape.size()) {
-    LOGS(logger, VERBOSE) << "The size of shape must be less than or equal to the rank of input.";
-  }
-
-  if (!IsValidMultidirectionalBroadcast(input_shape, new_shape, logger)) {
+  std::vector<int64_t> output_shape;
+  if (!GetBidirectionalBroadcastShape(input_shape, new_shape, output_shape)) {
     LOGS(logger, VERBOSE) << "The input cannot expand to shape " << GetShapeString(new_shape);
     return false;
   }

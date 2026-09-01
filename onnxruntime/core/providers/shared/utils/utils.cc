@@ -4,6 +4,8 @@
 
 #include "utils.h"
 
+#include <utility>
+
 #include "core/common/safeint.h"
 #include "core/framework/node_unit.h"
 #include "core/framework/tensorprotoutils.h"
@@ -27,7 +29,7 @@ bool GetType(const NodeArg& node_arg, int32_t& type, const logging::Logger& logg
 
 namespace {
 bool GetClipMinMaxImpl(std::function<const ONNX_NAMESPACE::TensorProto*(const std::string&)> get_const_initializer,
-                       const Node& node, float& min, float& max, const logging::Logger& logger) {
+                       const Graph& graph, const Node& node, float& min, float& max, const logging::Logger& logger) {
   const auto& node_name = node.Name();
   int32_t input_type;
   if (!GetType(*node.InputDefs()[0], input_type, logger)) {
@@ -50,7 +52,7 @@ bool GetClipMinMaxImpl(std::function<const ONNX_NAMESPACE::TensorProto*(const st
         return false;
       }
 
-      Initializer unpacked_tensor_min(*initializer);
+      Initializer unpacked_tensor_min(graph, *initializer);
       switch (input_type) {
         case ONNX_NAMESPACE::TensorProto_DataType_FLOAT:
           value = unpacked_tensor_min.DataAsSpan<float>()[0];
@@ -97,18 +99,7 @@ bool GetClipMinMax(const GraphViewer& graph_viewer, const Node& node, float& min
       [&graph_viewer](const std::string& name) -> const ONNX_NAMESPACE::TensorProto* {
         return graph_viewer.GetConstantInitializer(name);
       },
-      node, min, max, logger);
-}
-
-// deprecated version that is not able to check if the initializer is constant
-bool GetClipMinMax(const InitializedTensorSet& initializers, const Node& node, float& min, float& max,
-                   const logging::Logger& logger) {
-  return GetClipMinMaxImpl(
-      [&initializers](const std::string& name) -> const ONNX_NAMESPACE::TensorProto* {
-        auto entry = initializers.find(name);
-        return entry == initializers.end() ? nullptr : entry->second;
-      },
-      node, min, max, logger);
+      graph_viewer.GetGraph(), node, min, max, logger);
 }
 
 NodeAttrHelper::NodeAttrHelper(const onnxruntime::Node& node)
@@ -157,6 +148,22 @@ const std::string& NodeAttrHelper::Get(const std::string& key, const std::string
   return def_val;
 }
 
+std::string NodeAttrHelper::Get(const std::string& key, std::string&& def_val) const {
+  if (auto entry = node_attributes_.find(key); entry != node_attributes_.end()) {
+    return entry->second.s();
+  }
+
+  return std::move(def_val);
+}
+
+std::string NodeAttrHelper::Get(const std::string& key, const char* def_val) const {
+  if (auto entry = node_attributes_.find(key); entry != node_attributes_.end()) {
+    return entry->second.s();
+  }
+
+  return def_val;
+}
+
 std::vector<int32_t> NodeAttrHelper::Get(const std::string& key, const std::vector<int32_t>& def_val) const {
   if (auto entry = node_attributes_.find(key); entry != node_attributes_.end()) {
     const auto& attr = entry->second;
@@ -187,6 +194,15 @@ std::vector<int64_t> NodeAttrHelper::Get(const std::string& key, const std::vect
   if (auto entry = node_attributes_.find(key); entry != node_attributes_.end()) {
     const auto& values = entry->second.ints();
     return std::vector<int64_t>{values.cbegin(), values.cend()};
+  }
+
+  return def_val;
+}
+
+std::vector<std::string> NodeAttrHelper::Get(const std::string& key, const std::vector<std::string>& def_val) const {
+  if (auto entry = node_attributes_.find(key); entry != node_attributes_.end()) {
+    const auto& values = entry->second.strings();
+    return std::vector<std::string>{values.cbegin(), values.cend()};
   }
 
   return def_val;

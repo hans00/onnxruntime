@@ -5,6 +5,7 @@
 #include "gtest/gtest.h"
 #include "test/providers/provider_test_utils.h"
 #include "test/util/include/default_providers.h"
+#include "test/common/tensor_op_test_utils.h"
 
 namespace onnxruntime {
 namespace test {
@@ -35,8 +36,10 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
   excluded_providers.insert(excluded_providers_input.cbegin(), excluded_providers_input.cend());
 
   // NNAPI EP does not support empty output
+  // VSINPU EP does not support empty output
   if (std::any_of(output_dims.cbegin(), output_dims.cend(), [](int64_t i) { return i == 0; })) {
     excluded_providers.insert(kNnapiExecutionProvider);
+    excluded_providers.insert(kVSINPUExecutionProvider);
   }
 
   // TODO: ORT behavior when step < 0 and end = INT_MAX is wrong. Fix it and
@@ -51,6 +54,7 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
 
   if (onnx_shape_disagreement) {
     excluded_providers.insert(kCoreMLExecutionProvider);
+    excluded_providers.insert(kOpenVINOExecutionProvider);
   }
 
   if (!v10_only) {
@@ -88,7 +92,7 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
 
   run_test(false);
 
-  // NNAPI EP requires the starts/ends/axes/steps be initializers
+  // EPs like NNAPI and CoreML require the starts/ends/axes/steps be initializers
   run_test(true);
 }
 
@@ -261,17 +265,17 @@ TEST(SliceTest, Slice3D) {
                        332.0f, 333.0f});
 }
 
-template <typename TInt>
+template <typename T>
 static void TestSlice1DIntData() {
-  static_assert(std::is_integral_v<TInt>);
-  RunSliceTest<TInt>({6},
-                     {0, 1, 2, 3, 4, 5},
-                     {2},
-                     {4},
-                     {0},
-                     {},
-                     {2},
-                     {2, 3});
+  // static_assert(std::is_integral_v<TInt>);
+  RunSliceTest<T>({6},
+                  GetTypedArray<T>({0.f, 1.f, 2.f, 3.f, 4.f, 5.f}),
+                  {2},
+                  {4},
+                  {0},
+                  {},
+                  {2},
+                  GetTypedArray<T>({2.f, 3.f}));
 }
 
 TEST(SliceTest, Slice1D_Int32) {
@@ -281,6 +285,21 @@ TEST(SliceTest, Slice1D_Int32) {
 TEST(SliceTest, Slice1D_Int64) {
   TestSlice1DIntData<int64_t>();
 }
+
+TEST(SliceTest, Slice1D_Float) {
+  TestSlice1DIntData<float>();
+}
+
+TEST(SliceTest, Slice1D_Float16) {
+  TestSlice1DIntData<MLFloat16>();
+}
+
+template <typename T>
+class SliceTest : public ::testing::Test {
+};
+
+using SliceTestTypes = ::testing::Types<float, MLFloat16>;
+TYPED_TEST_SUITE(SliceTest, SliceTestTypes);
 
 TEST(SliceTest, Slice1D_String) {
   RunSliceTest<std::string>({6},
@@ -294,16 +313,16 @@ TEST(SliceTest, Slice1D_String) {
 }
 
 // Only Slice V10 can run the following tests
-TEST(SliceTest, Slice1D_WithPositiveSteps) {
-  RunSliceTest<float>({6},
-                      {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
-                      {0},
-                      {6},
-                      {0},
-                      {2},
-                      {3},
-                      {0.0f, 2.0f, 4.0f},
-                      true);
+TYPED_TEST(SliceTest, Slice1D_WithPositiveSteps) {
+  RunSliceTest<TypeParam>({6},
+                          GetTypedArray<TypeParam>({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f}),
+                          {0},
+                          {6},
+                          {0},
+                          {2},
+                          {3},
+                          GetTypedArray<TypeParam>({0.0f, 2.0f, 4.0f}),
+                          true);
 }
 
 // In numpy:
@@ -334,6 +353,9 @@ TEST(SliceTest, Slice1D_WithNegativeSteps_EndOutOfBounds_1) {
 }
 
 TEST(SliceTest, Slice1D_WithNegativeSteps_EndOutOfBounds_2) {
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
   RunSliceTest<float>({6},
                       {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
                       {0},
@@ -515,6 +537,9 @@ TEST(SliceTest, Slice1D_ReverseAllAxes_1) {
   if (DefaultDmlExecutionProvider().get() != nullptr) {
     GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{2,2}] did not match run output shape [{0,0}] for output";
   }
+  if (DefaultVSINPUExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{4}] did not match run output shape [{0}] for output";
+  }
 
   RunSliceTest<float>({4},
                       {1.0f, 2.0f, 3.0f, 4.0f},
@@ -639,6 +664,30 @@ TEST(SliceTest, OptionalAxesInputAloneMissing) {
   testv10.AddInput<int64_t>("steps", {static_cast<int64_t>(steps.size())}, steps);
   testv10.AddOutput<float>("output", output_dims, output_vals);
   testv10.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+}
+
+TEST(SliceTest, InvalidAxesOutOfBounds) {
+  OpTester testv10("Slice", 10);
+  testv10.AddInput<float>("data", {2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
+  testv10.AddInput<int64_t>("starts", {1}, {0});
+  testv10.AddInput<int64_t>("ends", {1}, {1});
+  testv10.AddInput<int64_t>("axes", {1}, {2});
+  testv10.AddOutput<float>("output", {1, 2}, {1.0f, 2.0f});
+  testv10.Run(OpTester::ExpectResult::kExpectFailure,
+              "axis outside of the tensor dimension count",
+              {kTensorrtExecutionProvider, kDmlExecutionProvider});
+}
+
+TEST(SliceTest, InvalidAxesDuplicates) {
+  OpTester testv10("Slice", 10);
+  testv10.AddInput<float>("data", {2, 2}, {1.0f, 2.0f, 3.0f, 4.0f});
+  testv10.AddInput<int64_t>("starts", {2}, {0, 0});
+  testv10.AddInput<int64_t>("ends", {2}, {1, 1});
+  testv10.AddInput<int64_t>("axes", {2}, {0, 0});
+  testv10.AddOutput<float>("output", {1, 2}, {1.0f, 2.0f});
+  testv10.Run(OpTester::ExpectResult::kExpectFailure,
+              "'axes' has duplicates",
+              {kTensorrtExecutionProvider, kDmlExecutionProvider});
 }
 
 TEST(SliceTest, Slice2D_ReverseSubsetOfNegAxes_1) {

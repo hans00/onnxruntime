@@ -16,46 +16,33 @@ done
 EXIT_CODE=1
 
 uname -a
-mkdir $BINARY_DIR/$ARTIFACT_NAME
-mkdir $BINARY_DIR/$ARTIFACT_NAME/lib
-mkdir $BINARY_DIR/$ARTIFACT_NAME/include
-echo "Directories created"
-cp $BINARY_DIR/$BUILD_CONFIG/$LIB_NAME $BINARY_DIR/$ARTIFACT_NAME/lib
-if [[ -f "$BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_cuda.so" ]]; then
-    cp $BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_shared.so $BINARY_DIR/$ARTIFACT_NAME/lib
-    cp $BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_cuda.so $BINARY_DIR/$ARTIFACT_NAME/lib
-fi
-if [[ -f "$BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_tensorrt.so" ]]; then
-    cp $BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_tensorrt.so $BINARY_DIR/$ARTIFACT_NAME/lib
-fi
-if [[ -f "$BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_rocm.so" ]]; then
-    cp $BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_shared.so $BINARY_DIR/$ARTIFACT_NAME/lib
-    cp $BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_rocm.so $BINARY_DIR/$ARTIFACT_NAME/lib
-fi
+cd "$BINARY_DIR"
+mv installed/usr/local $ARTIFACT_NAME
+mv $ARTIFACT_NAME/include/onnxruntime/* $ARTIFACT_NAME/include
+rmdir $ARTIFACT_NAME/include/onnxruntime
+# Do not ship onnx_test_runner
+rm -rf $ARTIFACT_NAME/bin
 echo "Copy debug symbols in a separate file and strip the original binary."
 if [[ $LIB_NAME == *.dylib ]]
 then
     dsymutil $BINARY_DIR/$ARTIFACT_NAME/lib/$LIB_NAME -o $BINARY_DIR/$ARTIFACT_NAME/lib/$LIB_NAME.dSYM
     strip -S $BINARY_DIR/$ARTIFACT_NAME/lib/$LIB_NAME
-    ln -s $LIB_NAME $BINARY_DIR/$ARTIFACT_NAME/lib/libonnxruntime.dylib
+
+    # ORT NuGet packaging expects the unversioned library (libonnxruntime.dylib) to contain the binary content,
+    # because the versioned library is excluded by the nuspec generation script.
+    # We explicitly overwrite the symlink with the real file to ensure 'nuget pack' (especially on Windows)
+    # doesn't pack an empty/broken symlink.
+    # Only applies to versioned libonnxruntime libraries (e.g. libonnxruntime.1.24.0.dylib).
+    if [[ "$LIB_NAME" =~ ^libonnxruntime\..*\.dylib$ && -L "$BINARY_DIR/$ARTIFACT_NAME/lib/libonnxruntime.dylib" ]]; then
+       rm "$BINARY_DIR/$ARTIFACT_NAME/lib/libonnxruntime.dylib"
+       cp "$BINARY_DIR/$ARTIFACT_NAME/lib/$LIB_NAME" "$BINARY_DIR/$ARTIFACT_NAME/lib/libonnxruntime.dylib"
+    fi
+
     # copy the CoreML EP header for macOS build (libs with .dylib ext)
     cp $SOURCE_DIR/include/onnxruntime/core/providers/coreml/coreml_provider_factory.h  $BINARY_DIR/$ARTIFACT_NAME/include
-elif [[ $LIB_NAME == *.so.* ]]
-then
-    ln -s $LIB_NAME $BINARY_DIR/$ARTIFACT_NAME/lib/libonnxruntime.so
-fi
-cp $SOURCE_DIR/include/onnxruntime/core/session/onnxruntime_*.h $BINARY_DIR/$ARTIFACT_NAME/include
-cp $SOURCE_DIR/include/onnxruntime/core/framework/provider_options.h  $BINARY_DIR/$ARTIFACT_NAME/include
-cp $SOURCE_DIR/include/onnxruntime/core/providers/cpu/cpu_provider_factory.h  $BINARY_DIR/$ARTIFACT_NAME/include
-cp $SOURCE_DIR/orttraining/orttraining/training_api/include/onnxruntime_training_*.h  $BINARY_DIR/$ARTIFACT_NAME/include
-
-if [[ -f "$BINARY_DIR/$BUILD_CONFIG/libonnxruntime_providers_cuda.so" ]]; then
-# copy headers for context context used in custom ops
-mkdir -p $BINARY_DIR/$ARTIFACT_NAME/include/core/providers/cuda
-cp $SOURCE_DIR/include/onnxruntime/core/providers/custom_op_context.h $BINARY_DIR/$ARTIFACT_NAME/include/core/providers/custom_op_context.h
-cp $SOURCE_DIR/include/onnxruntime/core/providers/resource.h $BINARY_DIR/$ARTIFACT_NAME/include/core/providers/resource.h
-cp $SOURCE_DIR/include/onnxruntime/core/providers/cuda/cuda_context.h $BINARY_DIR/$ARTIFACT_NAME/include/core/providers/cuda/cuda_context.h
-cp $SOURCE_DIR/include/onnxruntime/core/providers/cuda/cuda_resource.h $BINARY_DIR/$ARTIFACT_NAME/include/core/providers/cuda/cuda_resource.h
+else
+   # Linux
+   mv $ARTIFACT_NAME/lib64 $ARTIFACT_NAME/lib
 fi
 
 # copy the README, licence and TPN

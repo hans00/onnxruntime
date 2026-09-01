@@ -1,6 +1,8 @@
 name: Update Python API Docs
 
-# Run when the Python API changes or every month so that the artifact does not expire
+# Run when the Python API changes or every week so that the artifact does not expire.
+# Also runs on pull requests that touch relevant files so doc generation errors
+# are caught early. The artifact is only published on the main branch.
 on:
   push:
     branches:
@@ -8,13 +10,17 @@ on:
     paths:
       - onnxruntime/python/**
       - docs/python/**
+  pull_request:
+    paths:
+      - onnxruntime/python/**
+      - docs/python/**
   schedule:
-    - cron: '0 0 1 * *'
+    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 concurrency:
-  group: "apidocs-python"
-  cancel-in-progress: true
+  group: "apidocs-python-${{ github.ref }}"
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: write
@@ -22,9 +28,14 @@ permissions:
 jobs:
   build:
     name: Generate Python API docs
-    runs-on: ubuntu-latest
+    runs-on: [
+        "self-hosted",
+        "1ES.Pool=onnxruntime-github-Ubuntu2204-AMD-CPU",
+        "JobId=apidocs-python-${{ github.run_id }}-${{ github.run_number }}-${{ github.run_attempt }}"
+        ]
+    timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - name: Install tools
         run: |
           sudo apt-get update
@@ -32,14 +43,15 @@ jobs:
           sudo apt-get install graphviz
       - name: Install dependencies
         run: |
-          python3 -m pip install --upgrade pip
+          python3 -m pip install --user --upgrade pip
           cd docs/python
-          python3 -m pip install -r requirements.txt
-          python3 -m pip install --pre onnxruntime-training -f https://download.onnxruntime.ai/onnxruntime_nightly_cpu.html
+          python3 -m pip install --user -r requirements.txt
+          python3 -m pip install --user --pre onnxruntime-training -f https://download.onnxruntime.ai/onnxruntime_nightly_cpu.html
           python3 -m pip list
       - name: Generate Python docs with Sphinx
         run: |
           cd tools/doc
+          chmod +x *
           ./builddoc.sh /usr/bin ../.. ../../build
       - name: Log source commit
         run: git rev-parse --short HEAD > build/docs/html/source-version.txt
@@ -49,8 +61,9 @@ jobs:
           mkdir -p _site/docs/api/
           mv build/docs/html _site/docs/api/python
       - name: Upload docs artifact
-        uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: onnxruntime-python-apidocs
           path: _site
-          retention-days: 60
+          retention-days: 10

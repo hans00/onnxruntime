@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Copyright (c) 2020, NXP Semiconductor, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
 // Licensed under the MIT License.
 
 #include "core/providers/acl/tensor/concat.h"
@@ -20,7 +21,7 @@ namespace acl {
 template <typename T>
 Status Concat<T>::Compute(OpKernelContext* ctx) const {
   if (axis_ > 3) {
-    LOGS_DEFAULT(WARNING) << "ArmNN does not have support for tensors with 4 or more dimensions; defaulting to cpu implementation";
+    LOGS_DEFAULT(WARNING) << "ACL does not support tensors with 4 or more dimensions; defaulting to cpu implementation";
     return onnxruntime::Concat::Compute(ctx);
   }
 
@@ -66,7 +67,7 @@ Status Concat<T>::Compute(OpKernelContext* ctx) const {
   }
 
   if (output_dims.size() > 4 || axis_ > 3) {
-    LOGS_DEFAULT(WARNING) << "ArmNN does not have support for tensors with 4 or more dimensions; defaulting to cpu implementation";
+    LOGS_DEFAULT(WARNING) << "ACL does not support tensors with 4 or more dimensions; defaulting to cpu implementation";
     return onnxruntime::Concat::Compute(ctx);
   }
 
@@ -76,11 +77,7 @@ Status Concat<T>::Compute(OpKernelContext* ctx) const {
   LOGS_DEFAULT(VERBOSE) << "Concat ACL:";
 
   arm_compute::Tensor output;
-#ifdef ACL_2308
   std::vector<const arm_compute::ITensor*> inputs_vector;
-#else
-  std::vector<arm_compute::ITensor*> inputs_vector;
-#endif
   for (int i = 0; i < input_count; i++) {
     arm_compute::Tensor* input = new arm_compute::Tensor();
     auto X = input_tensors[i];
@@ -101,11 +98,7 @@ Status Concat<T>::Compute(OpKernelContext* ctx) const {
   for (int i = 0; i < input_count; i++) {
     auto X = input_tensors[i];
     const T* x_data = X->Data<T>();
-#ifdef ACL_2308
     arm_compute::Tensor* in = const_cast<arm_compute::Tensor*>(static_cast<const arm_compute::Tensor*>(inputs_vector[i]));
-#else
-    arm_compute::Tensor* in = static_cast<arm_compute::Tensor*>(inputs_vector[i]);
-#endif
 
     if (X->Shape().Size() != 0 && in->info()->has_padding()) {
       in->allocator()->allocate();

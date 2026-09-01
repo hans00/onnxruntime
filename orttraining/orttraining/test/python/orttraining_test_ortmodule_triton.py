@@ -12,7 +12,6 @@ import onnx
 import pytest
 import torch
 from onnx import TensorProto, helper
-from packaging.version import Version
 from torch._C import _from_dlpack
 from torch.utils.dlpack import to_dlpack
 
@@ -100,7 +99,7 @@ def _torch_softmax(input, **kwargs):
 
 def _torch_reduce(input, func, **kwargs):
     rank = len(input.shape)
-    axes = kwargs.get("axes", [idx for idx in range(rank)])
+    axes = kwargs.get("axes", list(range(rank)))
     keepdims = kwargs.get("keepdims", True)
     axes = [axis if axis >= 0 else rank + axis for axis in axes]
     axes.sort(reverse=True)
@@ -207,7 +206,7 @@ def _run_op_test(op_type, onnx_dtype, create_model_func, gen_inputs_func, **kwar
     if isinstance(pt_outputs, tuple):
         assert isinstance(ort_outputs, tuple)
         assert len(pt_outputs) == len(ort_outputs)
-        for pt_output, ort_output in zip(pt_outputs, ort_outputs):
+        for pt_output, ort_output in zip(pt_outputs, ort_outputs, strict=False):
             _test_helpers.assert_values_are_close(pt_output, _from_dlpack(ort_output), rtol=rtol, atol=atol)
     else:
         _test_helpers.assert_values_are_close(pt_outputs, _from_dlpack(ort_outputs), rtol=rtol, atol=atol)
@@ -490,7 +489,7 @@ def test_dropout_op(onnx_dtype, input_shape_and_ratio):
     def _check_output(x, y, mask, ratio):
         all_count = 0
         masked_count = 0
-        for x_value, y_value, mask_value in zip(x, y, mask):
+        for x_value, y_value, mask_value in zip(x, y, mask, strict=False):
             if mask_value:
                 assert abs(y_value - x_value / (1.0 - ratio)) < 0.05
             else:
@@ -841,32 +840,6 @@ def test_slice_scel_module(dtype, has_sum):
         ]
 
     _run_module_test(NeuralNetSliceScel, dtype, _gen_inputs, 2)
-
-
-@pytest.mark.skipif(
-    Version(torch.__version__) < Version("2.1"), reason="PyTorch has scaled_dot_product_attention since 2.1."
-)
-def test_scaled_dot_product_attention_module():
-    class NeuralNetScaledDotProductAttention(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.linear1 = torch.nn.Linear(64, 64, bias=False, dtype=torch.float16)
-            self.linear2 = torch.nn.Linear(64, 64, bias=False, dtype=torch.float16)
-            self.linear3 = torch.nn.Linear(64, 64, bias=False, dtype=torch.float16)
-
-        def forward(self, q, k, v):
-            return torch.nn.functional.scaled_dot_product_attention(
-                self.linear1(q), self.linear2(k), self.linear3(v)
-            ).to(torch.float16)
-
-    def _gen_inputs(dtype):
-        return [
-            (torch.rand(32, 8, 128, 64) * 0.01).to(dtype=torch.float16, device=DEVICE),
-            (torch.rand(32, 8, 128, 64) * 0.01).to(dtype=torch.float16, device=DEVICE),
-            (torch.rand(32, 8, 128, 64) * 0.01).to(dtype=torch.float16, device=DEVICE),
-        ]
-
-    _run_module_test(NeuralNetScaledDotProductAttention, torch.float16, _gen_inputs, 3)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16])

@@ -13,7 +13,7 @@ from onnx import TensorProto, helper
 
 from onnxruntime.training.ortmodule import register_graph_optimizer
 
-from .._utils import get_attribute, to_numpy_array
+from .._utils import get_attribute, to_torch_tensor
 
 
 @triton.jit
@@ -79,7 +79,7 @@ def slice_scel(logit, label, ignore_index):
     logit_d = logit.shape[-2]
     d = logit_d - 1
     n = logit.numel() // (logit_d * c)
-    log_prob_shape = list(logit.shape)[:-2] + [d, c]
+    log_prob_shape = list(logit.shape)[:-2] + [d, c]  # noqa: RUF005
     log_prob = torch.empty(log_prob_shape, dtype=torch.float, device=logit.device)
     rblock = 4096 if c > 4096 else triton.next_power_of_2(c)
     num_warps = 16 if rblock >= 4096 else (8 if rblock >= 2048 else 4)
@@ -155,7 +155,7 @@ def slice_scel_backward(dloss, log_prob, label, factor, bias):
     c = log_prob.shape[-1]
     d = log_prob.shape[-2]
     dlogit_d = d + 1
-    dlogit_shape = list(log_prob.shape)[:-2] + [dlogit_d, c]
+    dlogit_shape = list(log_prob.shape)[:-2] + [dlogit_d, c]  # noqa: RUF005
     dlogit = (
         torch.empty(dlogit_shape, dtype=dloss.dtype, device=dloss.device)
         if bias is not None
@@ -212,7 +212,7 @@ def _get_constant(graph, arg):
             initializer = init
     if initializer is None:
         return None
-    return to_numpy_array(initializer)
+    return to_torch_tensor(initializer).tolist()
 
 
 def _check_slice(graph, node, start, end, axis, step):
@@ -224,9 +224,9 @@ def _check_slice(graph, node, start, end, axis, step):
         axis += rank
     for idx, value in enumerate([start, end, axis, step]):
         constant = _get_constant(graph, node.input[idx + 1])
-        if constant is None or constant.size != 1:
+        if constant is None or len(constant) != 1:
             return False
-        constant_value = constant.item()
+        constant_value = constant[0]
         if idx == 2 and constant_value < 0:
             constant_value += rank
         if constant_value != value:

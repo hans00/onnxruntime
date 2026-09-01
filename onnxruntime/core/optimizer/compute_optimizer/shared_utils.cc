@@ -188,8 +188,8 @@ NodeArg* CreateInitializerFromVector(Graph& graph,
               "The total count of dims does not match the size of values. ",
               "total_count: ", total_count, " values.size(): ", values.size());
 
-  const_tensor.set_raw_data(values.data(), values.size() * sizeof(int64_t));
-  return &graph_utils::AddInitializer(graph, const_tensor);
+  utils::SetRawDataInTensorProto(const_tensor, values.data(), values.size() * sizeof(int64_t));
+  return &graph_utils::AddInitializerWithOrtValue(graph, const_tensor);
 }
 
 NodeArg* InsertNodesForValidIndices(Graph& graph,

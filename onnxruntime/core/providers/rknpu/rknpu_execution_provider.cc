@@ -28,7 +28,7 @@ constexpr const char* RKNPU = "Rknpu";
 struct RknpuFuncState {
   std::string uniq_input_shape;
 
-  std::unique_ptr<rk::nn::Exection> exector;
+  std::unique_ptr<rk::nn::Execution> exector;
   ONNX_NAMESPACE::ModelProto model_proto;
   std::unordered_map<std::string, int> input_map;
   std::unordered_map<std::string, int> output_map;
@@ -50,7 +50,9 @@ std::vector<std::vector<int>> RknpuExecutionProvider::GetSupportedNodes(
 
 std::vector<std::unique_ptr<ComputeCapability>>
 RknpuExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_viewer,
-                                      const IKernelLookup& /*kernel_lookup*/) const {
+                                      const IKernelLookup& /*kernel_lookup*/,
+                                      const GraphOptimizerRegistry& /* graph_optimizer_registry */,
+                                      IResourceAccountant* /* resource_accountant */) const {
   // Find inputs, initializers and outputs for each supported subgraph
   std::vector<std::unique_ptr<ComputeCapability>> result;
 
@@ -100,8 +102,8 @@ RknpuExecutionProvider::GetCapability(const onnxruntime::GraphViewer& graph_view
   const auto graph_outputs = graph_viewer.GetOutputs();
   // Add initializer to graph_viewer
   const auto& init_tensors = graph_viewer.GetAllInitializedTensors();
-  for (const auto& tensor : init_tensors) {
-    graph_build.AddInitializedTensor(*(tensor.second));
+  for (const auto& [name, _] : init_tensors) {
+    graph_utils::MakeInitializerCopyIfNotExist(graph_viewer.GetGraph(), graph_build, name);
   }
 
   ORT_ENFORCE(graph_build.Resolve().IsOK());
@@ -282,7 +284,7 @@ common::Status RknpuExecutionProvider::Compile(const std::vector<FusedNodeAndGra
       std::unique_ptr<RknpuFuncState> p =
           std::make_unique<RknpuFuncState>();
       rk::nn::Graph* graph = new rk::nn::Graph();
-      *p = {"", std::unique_ptr<rk::nn::Exection>(new rk::nn::Exection(graph)),
+      *p = {"", std::unique_ptr<rk::nn::Execution>(new rk::nn::Execution(graph)),
             model_proto_[context->node_name], input_info_[context->node_name],
             output_info_[context->node_name],
             std::vector<int>{}, std::vector<int>{}};

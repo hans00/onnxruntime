@@ -46,7 +46,7 @@ static const std::unordered_map<std::string, std::vector<int>> stage1_fp32_node_
 };
 
 // Currently the list here is same as stage1 above due to empty FP32_Nodes.
-// It's possibile we will have more FP32 nodes added, this map will also be extended.
+// It's possible we will have more FP32 nodes added, this map will also be extended.
 static const std::unordered_map<std::string, std::vector<int>> stage2_fp32_node_args = {
     {"Dropout", {1}},
     {"DropoutGrad", {2}},
@@ -529,7 +529,7 @@ Status TransformGraphForMixedPrecision(Graph& graph,
   // Add new FP16/BFloat16 initializers to the graph
   for (const auto& kv : mixed_precision_initializers) {
     const ONNX_NAMESPACE::TensorProto* tensor_proto = kv.second;
-    Initializer initializer(*tensor_proto, graph.ModelPath());
+    Initializer initializer(graph, *tensor_proto, graph.ModelPath());
     ONNX_NAMESPACE::TensorProto weight_tensor_proto = mixed_precision_type == ONNX_NAMESPACE::TensorProto_DataType_FLOAT16 ? initializer.ToFP16(kv.first) : initializer.ToBFloat16(kv.first);
     graph.AddInitializedTensor(weight_tensor_proto);
   }

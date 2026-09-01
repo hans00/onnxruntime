@@ -5,7 +5,9 @@
 
 #include "core/providers/cpu/math/gemm_helper.h"
 #include "core/providers/cuda/shared_inc/fpgeneric.h"
+#ifndef BUILD_CUDA_EP_AS_PLUGIN
 #include "core/providers/cuda/tunable/math/gemm.h"
+#endif
 
 namespace onnxruntime {
 namespace cuda {
@@ -72,9 +74,11 @@ Status Gemm<T>::ComputeInternal(OpKernelContext* ctx) const {
   // Bail out early if the output is going to be empty
   if (Y->Shape().Size() == 0) return Status::OK();
 
+#ifndef BUILD_CUDA_EP_AS_PLUGIN
   if (GetTuningContext()->IsTunableOpEnabled()) {
     return tunable::TunableGemm<T>(M, N, K, trans_A_, trans_B_, alpha_, B ? beta_ : 0.0f, this, ctx);
   }
+#endif
 
   return ComputeDefault(ctx, M, N, K);
 }
@@ -135,6 +139,16 @@ Status Gemm<T>::ComputeDefault(OpKernelContext* ctx, int M, int N, int K) const 
       // B is (M, N), no broadcast needed.
       CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(out_data, b_data, static_cast<size_t>(M) * N * sizeof(T), cudaMemcpyDeviceToDevice, Stream(ctx)));
     }
+  }
+
+  if (K == 0) {
+    if (beta_ == 0 || B == nullptr) {
+      // When we have (M, 0, N) then the output should be filled out with zeros
+      // unless we have a bias
+      Fill<CudaT>(Stream(ctx), reinterpret_cast<CudaT*>(Y->MutableData<T>()), CudaT(0.f),
+                  Y->Shape().Size());
+    }
+    return Status::OK();
   }
 
   CudaT alpha = ToCudaType<T>::FromFloat(alpha_);

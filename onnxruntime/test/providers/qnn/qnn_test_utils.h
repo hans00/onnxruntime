@@ -4,18 +4,30 @@
 #pragma once
 
 #if !defined(ORT_MINIMAL_BUILD)
-#include <string>
 #include <cmath>
+#include <optional>
+#include <string>
+#include <type_traits>
 #include <unordered_map>
+
 #include "core/framework/provider_options.h"
+#include "core/framework/tensor_shape.h"
+#include "core/common/float16.h"
 #include "core/util/qmath.h"
 
-#include "test/optimizer/qdq_test_utils.h"
+#include "test/util/include/default_providers.h"
+#include "test/unittest_util/qdq_test_utils.h"
 #include "test/util/include/test_utils.h"
 #include "test/util/include/test/test_environment.h"
-#include "test/util/include/default_providers.h"
 
 #include "gtest/gtest.h"
+
+// QNN SDK headers for platform attribute queries.
+#include "QNN/QnnDevice.h"
+#include "QNN/HTP/QnnHtpDevice.h"
+#include "QNN/QnnTypes.h"
+#include "QNN/QnnInterface.h"
+#include "QNN/QnnLog.h"
 
 namespace onnxruntime {
 namespace test {
@@ -30,7 +42,37 @@ struct QuantParams {
   float scale;
   QType zero_point;
 
-  static QuantParams<QType> Compute(float rmin, float rmax) {
+  inline std::pair<float, float> CalcRminRmax() const {
+    constexpr float qmin = static_cast<float>(std::numeric_limits<QType>::min());
+    constexpr float qmax = static_cast<float>(std::numeric_limits<QType>::max());
+    const float qrange = (qmax - qmin);
+    const float rrange = this->scale * qrange;
+    const float rmin = -(static_cast<float>(this->zero_point) - qmin) * this->scale;
+    const float rmax = rrange + rmin;
+
+    return {rmin, rmax};
+  }
+
+  inline bool IsSymmetric() const {
+    constexpr float qmin = static_cast<float>(std::numeric_limits<QType>::min());
+    constexpr float qmax = static_cast<float>(std::numeric_limits<QType>::max());
+    float init_zero_point = (qmin + qmax) / 2.0;
+    const QType symm_zero_point = static_cast<QType>(RoundHalfToEven(
+        std::max(qmin, std::min(qmax, init_zero_point))));
+
+    return this->zero_point == symm_zero_point;
+  }
+
+  static QuantParams<QType> Compute(float rmin, float rmax, bool symmetric = false) {
+    return Compute(
+        rmin,
+        rmax,
+        std::numeric_limits<QType>::min(),
+        std::numeric_limits<QType>::max(),
+        symmetric);
+  }
+
+  static QuantParams<QType> Compute(float rmin, float rmax, QType qmin, QType qmax, bool symmetric = false) {
     // Ensure a minimum range of 0.0001 (required by QNN)
     rmax = std::max(rmax, rmin + 0.0001f);
 
@@ -38,16 +80,38 @@ struct QuantParams {
     rmin = std::min(rmin, 0.0f);
     rmax = std::max(rmax, 0.0f);
 
-    constexpr float qmin = static_cast<float>(std::numeric_limits<QType>::min());
-    constexpr float qmax = static_cast<float>(std::numeric_limits<QType>::max());
+    if (symmetric) {
+      const float abs_max = std::max(std::abs(rmin), std::abs(rmax));
+      rmax = abs_max;
+      rmin = -abs_max;
+    }
 
-    const float scale = rmax == rmin ? 1.0f : (rmax - rmin) / (qmax - qmin);
-    const float initial_zero_point = qmin - (rmin / scale);
-    const QType zero_point = static_cast<QType>(RoundHalfToEven(std::max(qmin, std::min(qmax, initial_zero_point))));
+    const float qmin_flt = qmin;
+    const float qmax_flt = qmax;
+    const float scale = (rmax - rmin) / (qmax_flt - qmin_flt);
+    float initial_zero_point = 0.0f;
+
+    if (symmetric) {
+      // Symmetric uses same formula for zero-point as asymmetric, but we can cancel out terms for
+      // increased numerical accuracy.
+      initial_zero_point = (qmin_flt + qmax_flt) / 2.0f;
+    } else {
+      initial_zero_point = qmin_flt - (rmin / scale);
+    }
+
+    const QType zero_point = static_cast<QType>(RoundHalfToEven(std::max(qmin_flt,
+                                                                         std::min(qmax_flt, initial_zero_point))));
 
     return QuantParams<QType>{scale, zero_point};
   }
 };
+
+// Utitity that converts quantization parameters from one type to another (e.g., uint8 to uint16).
+template <typename SrcQType, typename DstQType>
+inline QuantParams<DstQType> ConvertQuantParams(QuantParams<SrcQType> src_qparams) {
+  std::pair<float, float> src_rmin_rmax = src_qparams.CalcRminRmax();
+  return QuantParams<DstQType>::Compute(src_rmin_rmax.first, src_rmin_rmax.second, src_qparams.IsSymmetric());
+}
 
 // Signature for function that builds a QDQ model.
 // The parameter `output_qparams` contains quantization parameters that *can* be used for the QDQ model output.
@@ -55,11 +119,12 @@ struct QuantParams {
 // range of output values. Note that the function is able to overwrite the output_qparams parameter if necessary
 // (Example: MaxPool must have identical input and output quantization params).
 template <typename QuantType>
-using GetTestQDQModelFn = std::function<void(ModelTestBuilder& builder, std::vector<QuantParams<QuantType>>& output_qparams)>;
+using GetTestQDQModelFn = std::function<void(ModelTestBuilder& builder,
+                                             std::vector<QuantParams<QuantType>>& output_qparams)>;
 
 // Computes quantization parameters for an array of floating-point values.
 template <typename QType = uint8_t>
-inline QuantParams<QType> GetDataQuantParams(gsl::span<const float> data) {
+inline QuantParams<QType> GetDataQuantParams(gsl::span<const float> data, bool symmetric = false) {
   // Get min/max of raw data.
   float min_val = std::numeric_limits<float>::max();
   float max_val = std::numeric_limits<float>::min();
@@ -69,7 +134,7 @@ inline QuantParams<QType> GetDataQuantParams(gsl::span<const float> data) {
     max_val = std::max(max_val, val);
   }
 
-  return QuantParams<QType>::Compute(min_val, max_val);
+  return QuantParams<QType>::Compute(min_val, max_val, symmetric);
 }
 
 /**
@@ -150,6 +215,10 @@ struct TestInputDef {
     return shape_;
   }
 
+  const TensorShape GetTensorShape() const {
+    return TensorShape(shape_);
+  }
+
   bool IsInitializer() const {
     return is_initializer_;
   }
@@ -201,6 +270,42 @@ struct TestInputDef {
     return range;
   }
 
+  std::vector<std::pair<T, T>> GetRangePerChannel(size_t axis) const {
+    auto which_type = data_info_.index();
+    const size_t num_ranges = static_cast<size_t>(shape_.at(axis));
+
+    // Random. All axis dims get the same ranges (rand_min -> rand_max)
+    if (which_type == 1) {
+      RandomData rand_info = std::get<RandomData>(data_info_);
+      return std::vector<std::pair<T, T>>(num_ranges, std::pair<T, T>(rand_info.min, rand_info.max));
+    }
+
+    // Raw data. Get min/max per axis dim val
+    assert(which_type == 0);
+
+    const std::vector<T>& raw_data = std::get<RawData>(data_info_).data;
+    std::pair<T, T> init_range(std::numeric_limits<T>::max(), std::numeric_limits<T>::lowest());
+    std::vector<std::pair<T, T>> per_axis_ranges(num_ranges, init_range);
+    TensorShape shape(shape_);
+    size_t num_blocks = shape.SizeToDimension(axis);
+    size_t block_size = shape.SizeFromDimension(axis + 1);
+
+    size_t i = 0;
+    for (size_t n = 0; n < num_blocks; n++) {
+      for (size_t r = 0; r < num_ranges; r++) {
+        for (size_t j = 0; j < block_size; j++) {
+          std::pair<T, T>& range = per_axis_ranges[r];
+          range.first = std::min(range.first, raw_data[i]);
+          range.second = std::max(range.second, raw_data[i]);
+          i++;
+        }
+      }
+    }
+    assert(i == raw_data.size());
+
+    return per_axis_ranges;
+  }
+
  private:
   std::vector<int64_t> shape_;
   std::variant<RawData, RandomData> data_info_;
@@ -209,11 +314,146 @@ struct TestInputDef {
   std::pair<T, T> range_override_;
 };
 
+// Convert a float input definition to a float16 input definition.
+TestInputDef<MLFloat16> ConvertToFP16InputDef(const TestInputDef<float>& input_def);
+
 template <typename QType>
-inline QuantParams<QType> GetTestInputQuantParams(const TestInputDef<float>& input_def) {
+inline QuantParams<QType> GetTestInputQuantParams(const TestInputDef<float>& input_def, bool symmetric = false) {
   const std::pair<float, float> frange = input_def.GetRange();
-  return QuantParams<QType>::Compute(frange.first, frange.second);
+  return QuantParams<QType>::Compute(frange.first, frange.second, symmetric);
 }
+
+template <typename QType>
+static void GetTestInputQuantParamsPerChannel(const TestInputDef<float>& input_def, std::vector<float>& scales,
+                                              std::vector<QType>& zero_points, size_t axis, bool symmetric = false) {
+  const auto f32_ranges = input_def.GetRangePerChannel(axis);
+
+  scales.reserve(f32_ranges.size());
+  zero_points.reserve(f32_ranges.size());
+
+  for (const auto& range : f32_ranges) {
+    QuantParams<QType> params = QuantParams<QType>::Compute(range.first, range.second, symmetric);
+    scales.push_back(params.scale);
+    zero_points.push_back(params.zero_point);
+  }
+}
+
+// Define functions to get the quantization parameters (i.e., scale/zp) for input data that will be quantized
+// as int4 per-channel.
+#define DEF_GET_INPUT_QPARAMS_PER_CHAN_INT4_FUNC(INT4x2_TYPE)                                                 \
+  template <>                                                                                                 \
+  inline void GetTestInputQuantParamsPerChannel<INT4x2_TYPE>(const TestInputDef<float>& input_def,            \
+                                                             std::vector<float>& scales,                      \
+                                                             std::vector<INT4x2_TYPE>& zero_points,           \
+                                                             size_t axis, bool symmetric) {                   \
+    using UnpackedType = typename INT4x2_TYPE::UnpackedType;                                                  \
+    const auto f32_ranges = input_def.GetRangePerChannel(axis);                                               \
+    const size_t num_ranges = f32_ranges.size();                                                              \
+                                                                                                              \
+    scales.resize(num_ranges);                                                                                \
+    zero_points.resize(INT4x2_TYPE::CalcNumInt4Pairs(num_ranges));                                            \
+                                                                                                              \
+    for (size_t i = 0; i < num_ranges; i++) {                                                                 \
+      const auto& range = f32_ranges[i];                                                                      \
+      QuantParams<UnpackedType> params = QuantParams<UnpackedType>::Compute(range.first, range.second,        \
+                                                                            INT4x2_TYPE::min_val,             \
+                                                                            INT4x2_TYPE::max_val, symmetric); \
+      scales[i] = params.scale;                                                                               \
+                                                                                                              \
+      size_t r = i >> 1;                                                                                      \
+      size_t c = i & 0x1;                                                                                     \
+      zero_points[r].SetElem(c, params.zero_point);                                                           \
+    }                                                                                                         \
+  }
+
+DEF_GET_INPUT_QPARAMS_PER_CHAN_INT4_FUNC(Int4x2)
+DEF_GET_INPUT_QPARAMS_PER_CHAN_INT4_FUNC(UInt4x2)
+
+template <typename FloatType, typename QuantType>
+static void QuantizeValues(gsl::span<const FloatType> input, gsl::span<QuantType> output, const TensorShape& shape,
+                           gsl::span<const FloatType> scales, gsl::span<const QuantType> zero_points,
+                           std::optional<int64_t> axis) {
+  const size_t input_rank = shape.NumDimensions();
+  const size_t num_elems = static_cast<size_t>(shape.Size());
+  ORT_ENFORCE(input.size() == num_elems);
+  ORT_ENFORCE(output.size() == num_elems);
+
+  size_t block_count = 1;
+  size_t broadcast_dim = 1;
+  size_t block_size = num_elems;
+
+  if (axis.has_value()) {
+    size_t axis_no_neg = *axis < 0 ? static_cast<size_t>(*axis) + input_rank : static_cast<size_t>(*axis);
+    block_count = shape.SizeToDimension(axis_no_neg);
+    broadcast_dim = shape[axis_no_neg];
+    block_size = shape.SizeFromDimension(axis_no_neg + 1);
+  }
+
+  ORT_ENFORCE(scales.size() == broadcast_dim);
+  ORT_ENFORCE(zero_points.empty() || zero_points.size() == broadcast_dim);
+
+  size_t i = 0;
+
+  for (size_t n = 0; n < block_count; n++) {
+    for (size_t bd = 0; bd < broadcast_dim; bd++) {
+      QuantType zp = zero_points.empty() ? static_cast<QuantType>(0) : zero_points[bd];
+      if constexpr (std::is_same_v<QuantType, int32_t>) {
+        for (size_t e = 0; e < block_size; e++) {
+          output[i + e] = static_cast<QuantType>(input[i + e] / scales[bd]) + zp;
+        }
+      } else {
+        ParQuantizeLinearStd(&input[i], &output[i], block_size, scales[bd], zp, nullptr);
+      }
+      i += block_size;
+    }
+  }
+}
+
+// Define functions to quantize input data to 4-bits. Quantization can be done per-tensor or per-channel.
+#define DEF_QUANTIZE_VALUES_INT4_FUNC(INT4x2_TYPE, QUANT_FUNC)                                               \
+  template <>                                                                                                \
+  inline void QuantizeValues<float, INT4x2_TYPE>(gsl::span<const float> input,                               \
+                                                 gsl::span<INT4x2_TYPE> output,                              \
+                                                 const TensorShape& shape,                                   \
+                                                 gsl::span<const float> scales,                              \
+                                                 gsl::span<const INT4x2_TYPE> zero_points,                   \
+                                                 std::optional<int64_t> axis) {                              \
+    using UnpackedType = typename INT4x2_TYPE::UnpackedType;                                                 \
+    const size_t input_rank = shape.NumDimensions();                                                         \
+    const size_t num_int4_elems = static_cast<size_t>(shape.Size());                                         \
+    ORT_ENFORCE(input.size() == num_int4_elems);                                                             \
+    ORT_ENFORCE(output.size() == INT4x2_TYPE::CalcNumInt4Pairs(num_int4_elems));                             \
+                                                                                                             \
+    size_t block_count = 1;                                                                                  \
+    size_t broadcast_dim = 1;                                                                                \
+    size_t block_size = num_int4_elems;                                                                      \
+                                                                                                             \
+    if (axis.has_value()) {                                                                                  \
+      size_t axis_no_neg = *axis < 0 ? static_cast<size_t>(*axis) + input_rank : static_cast<size_t>(*axis); \
+      block_count = shape.SizeToDimension(axis_no_neg);                                                      \
+      broadcast_dim = shape[axis_no_neg];                                                                    \
+      block_size = shape.SizeFromDimension(axis_no_neg + 1);                                                 \
+    }                                                                                                        \
+                                                                                                             \
+    ORT_ENFORCE(scales.size() == broadcast_dim);                                                             \
+    ORT_ENFORCE(zero_points.empty() || zero_points.size() == INT4x2_TYPE::CalcNumInt4Pairs(broadcast_dim));  \
+                                                                                                             \
+    size_t i = 0;                                                                                            \
+                                                                                                             \
+    for (size_t n = 0; n < block_count; n++) {                                                               \
+      for (size_t bd = 0; bd < broadcast_dim; bd++) {                                                        \
+        size_t bd_i = bd >> 1;  /* bd / 2 */                                                                 \
+        size_t bd_j = bd & 0x1; /* bd % 2 */                                                                 \
+        UnpackedType zp = !zero_points.empty() ? zero_points[bd_i].GetElem(bd_j) : 0;                        \
+        QUANT_FUNC(&input[i], output.data(), i, i + block_size, scales[bd], INT4x2_TYPE(zp, 0), nullptr);    \
+        i += block_size;                                                                                     \
+      }                                                                                                      \
+    }                                                                                                        \
+    assert(i == (block_count * broadcast_dim * block_size));                                                 \
+  }
+
+DEF_QUANTIZE_VALUES_INT4_FUNC(Int4x2, ParQuantizeLinearStdS4)
+DEF_QUANTIZE_VALUES_INT4_FUNC(UInt4x2, ParQuantizeLinearStdU4)
 
 /**
  * Inferences a given serialized model. Returns output values via an out-param.
@@ -226,13 +466,15 @@ inline QuantParams<QType> GetTestInputQuantParams(const TestInputDef<float>& inp
  * \param output_vals Initialized to the inference results.
  * \param is_qnn_ep Ture: QNN EP is used. False: CPU EP is used (default).
  * \param session_option_pairs extra session options.
+ * \param graph_checker Function called on the Graph.
  */
 void InferenceModel(const std::string& model_data, const char* log_id,
                     const ProviderOptions& provider_options,
                     ExpectedEPNodeAssignment expected_ep_assignment, const NameMLValMap& feeds,
                     std::vector<OrtValue>& output_vals,
                     bool is_qnn_ep = false,
-                    const std::unordered_map<std::string, std::string>& session_option_pairs = {});
+                    const std::unordered_map<std::string, std::string>& session_option_pairs = {},
+                    std::function<void(const Graph&)>* graph_checker = nullptr);
 
 /**
  * If the ORT_UNIT_TEST_ENABLE_QNN_SAVER environment variable is enabled (set to 1), this function modifies
@@ -266,6 +508,85 @@ struct QDQTolerance {
   float value;
 };
 
+class QNNTestEnvironment {
+ public:
+  // Delete copy constructor and assignment operator
+  QNNTestEnvironment(const QNNTestEnvironment&) = delete;
+  QNNTestEnvironment& operator=(const QNNTestEnvironment&) = delete;
+
+  // Static method to get the singleton instance
+  static QNNTestEnvironment& GetInstance() {
+    static QNNTestEnvironment instance;
+    return instance;
+  }
+
+  bool dump_onnx() const { return dump_onnx_; }
+  bool dump_json() const { return dump_json_; }
+  bool dump_dlc() const { return dump_dlc_; }
+  bool verbose() const { return verbose_; }
+
+  std::filesystem::path CreateTestcaseDirs() {
+    std::string test_suite_name = ::testing::UnitTest::GetInstance()->current_test_info()->test_suite_name();
+    std::string test_name = ::testing::UnitTest::GetInstance()->current_test_info()->name();
+    std::filesystem::path output_dir = std::filesystem::current_path() / (test_suite_name + "_" + test_name);
+    std::filesystem::create_directories(output_dir);
+
+    return output_dir;
+  }
+
+ private:
+  // Private constructor for singleton
+  QNNTestEnvironment() {
+    ParseEnvironmentVars();
+  }
+
+  // Helper function to check if an environment variable is set
+  bool IsEnvVarSet(const char* name) {
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable : 4996)
+#endif
+    const char* value = std::getenv(name);
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
+    if (value == nullptr) {
+      return false;
+    }
+
+    // Consider the variable set if it's not empty and not "0"
+    return *value != '\0' && *value != '0';
+  }
+
+  void ParseEnvironmentVars() {
+    if (IsEnvVarSet("QNN_DUMP_ONNX")) {
+      std::cout << "[QNN only] ONNX model dumping enabled via environment variable." << std::endl;
+      dump_onnx_ = true;
+    }
+
+    if (IsEnvVarSet("QNN_DUMP_JSON")) {
+      std::cout << "[QNN only] Json QNN Graph dumping enabled via environment variable." << std::endl;
+      dump_json_ = true;
+    }
+
+    if (IsEnvVarSet("QNN_DUMP_DLC")) {
+      std::cout << "[QNN only] DLC dumping enabled via environment variable." << std::endl;
+      dump_dlc_ = true;
+    }
+
+    if (IsEnvVarSet("QNN_VERBOSE")) {
+      std::cout << "Verbose enabled via environment variable." << std::endl;
+      verbose_ = true;
+    }
+  }
+
+  bool dump_onnx_ = false;
+  bool dump_json_ = false;
+  bool dump_dlc_ = false;
+  bool verbose_ = false;
+};
+
 /**
  * Tests the accuracy of a QDQ model on QNN EP by runnning 3 inferences:
  *
@@ -281,9 +602,11 @@ struct QDQTolerance {
  * \param qnn_options QNN EP provider options.
  * \param opset_version The opset version.
  * \param expected_ep_assignment Describes "which nodes" should be assigned to the EP.
- * \param tolerance The percent tolerance (as fraction) QNN EP results are allowed to differ from the QDQ model on CPU EP.
- *                  This tolerance is a percentage of the output range.
+ * \param tolerance The percent tolerance (as fraction) QNN EP results are allowed to differ from the QDQ model
+ *                  on CPU EP. This tolerance is a percentage of the output range.
  * \param log_severity The logger's severity setting.
+ * \param ep_graph_checker Function called on the Graph generated for the QNN EP's session. Used to check node
+ *                         EP assignment.
  */
 template <typename QuantType>
 inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTestQDQModelFn<QuantType>& qdq_model_fn,
@@ -292,12 +615,23 @@ inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTe
                                  QDQTolerance tolerance = QDQTolerance(),
                                  logging::Severity log_severity = logging::Severity::kERROR,
                                  const std::string& qnn_ctx_model_path = "",
-                                 const std::unordered_map<std::string, std::string>& session_option_pairs = {}) {
+                                 const std::unordered_map<std::string, std::string>& session_option_pairs = {},
+                                 std::function<void(const Graph&)>* qnn_ep_graph_checker = nullptr) {
+  std::filesystem::path output_dir;
+  if (QNNTestEnvironment::GetInstance().dump_onnx() ||
+      QNNTestEnvironment::GetInstance().dump_dlc() ||
+      QNNTestEnvironment::GetInstance().dump_json()) {
+    output_dir = QNNTestEnvironment::GetInstance().CreateTestcaseDirs();
+  }
   // Add kMSDomain to cover contrib op like Gelu
   const std::unordered_map<std::string, int> domain_to_version = {{"", opset_version}, {kMSDomain, 1}};
 
   auto& logging_manager = DefaultLoggingManager();
   logging_manager.SetDefaultLoggerSeverity(log_severity);
+  if (QNNTestEnvironment::GetInstance().verbose()) {
+    logging_manager.RemoveSink(logging::SinkType::EtwSink);
+    logging_manager.SetDefaultLoggerSeverity(logging::Severity::kVERBOSE);
+  }
 
   // Create float model and serialize it to a string.
   onnxruntime::Model f32_model("f32_model", false, ModelMetaData(), PathString(),
@@ -307,8 +641,15 @@ inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTe
   std::string f32_model_data;
   f32_model_fn(f32_helper);
   f32_helper.SetGraphOutputs();
+
   ASSERT_STATUS_OK(f32_model.MainGraph().Resolve());
   f32_model.ToProto().SerializeToString(&f32_model_data);
+
+  if (QNNTestEnvironment::GetInstance().dump_onnx()) {
+    auto dump_path = output_dir / ToPathString("dumped_f32_model.onnx");
+    LOGS(logging_manager.DefaultLogger(), VERBOSE) << "Save onnx float32 model at: " << dump_path;
+    ASSERT_STATUS_OK(onnxruntime::Model::Save(f32_model, dump_path));
+  }
 
   // Run f32 model on CPU EP and collect outputs.
   std::vector<OrtValue> cpu_f32_outputs;
@@ -346,11 +687,31 @@ inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTe
   std::string qdq_model_data;
   qdq_model_fn(qdq_helper, output_qparams);
   qdq_helper.SetGraphOutputs();
+
   ASSERT_STATUS_OK(qdq_model.MainGraph().Resolve());
   qdq_model.ToProto().SerializeToString(&qdq_model_data);
 
+  if (QNNTestEnvironment::GetInstance().dump_onnx()) {
+    auto dump_path = output_dir / ToPathString("dumped_qdq_model.onnx");
+    LOGS(logging_manager.DefaultLogger(), VERBOSE) << "Save onnx QDQ model at: " << dump_path;
+    ASSERT_STATUS_OK(onnxruntime::Model::Save(qdq_model, dump_path));
+  }
+
   bool is_qnn_ep = true;
   TryEnableQNNSaver(qnn_options);
+  if (QNNTestEnvironment::GetInstance().dump_dlc()) {
+    qnn_options["dump_qnn_ir_dlc"] = "1";
+    qnn_options["dump_qnn_ir_dlc_dir"] = output_dir.string();
+#if defined(_WIN32)
+    qnn_options["qnn_ir_backend_path"] = "QnnIr.dll";
+#else
+    qnn_options["qnn_ir_backend_path"] = "libQnnIr.so";
+#endif  // defined(_WIN32)
+  }
+  if (QNNTestEnvironment::GetInstance().dump_json()) {
+    qnn_options["dump_json_qnn_graph"] = "1";
+    qnn_options["json_qnn_graph_dir"] = output_dir.string();
+  }
   std::vector<OrtValue> qnn_qdq_outputs;
   if (!qnn_ctx_model_path.empty()) {
     onnx::ModelProto model_proto;
@@ -366,7 +727,7 @@ inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTe
     // Run QDQ model on QNN EP and collect outputs.
     // Only need to apply the extra session options to this QDQ model inference on QNN EP
     InferenceModel(qdq_model_data, "qdq_model_logger", qnn_options, expected_ep_assignment,
-                   qdq_helper.feeds_, qnn_qdq_outputs, is_qnn_ep, session_option_pairs);
+                   qdq_helper.feeds_, qnn_qdq_outputs, is_qnn_ep, session_option_pairs, qnn_ep_graph_checker);
   }
 
   if (expected_ep_assignment != ExpectedEPNodeAssignment::None) {
@@ -482,8 +843,8 @@ inline void TestQDQModelAccuracy(const GetTestModelFn& f32_model_fn, const GetTe
  * \param qnn_options QNN EP provider options.
  * \param opset_version The opset version.
  * \param expected_ep_assignment Describes "which nodes" should be assigned to the EP.
- * \param tolerance The percent tolerance (as fraction) QNN EP results are allowed to differ from the FP16 model on CPU EP.
- *                  This tolerance is a percentage of the output range.
+ * \param tolerance The percent tolerance (as fraction) QNN EP results are allowed to differ from the FP16 model
+ *                  on CPU EP. This tolerance is a percentage of the output range.
  * \param log_severity The logger's severity setting.
  */
 inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
@@ -495,11 +856,21 @@ inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
                                   logging::Severity log_severity = logging::Severity::kERROR,
                                   const std::string& qnn_ctx_model_path = "",
                                   const std::unordered_map<std::string, std::string>& session_option_pairs = {}) {
+  std::filesystem::path output_dir;
+  if (QNNTestEnvironment::GetInstance().dump_onnx() ||
+      QNNTestEnvironment::GetInstance().dump_dlc() ||
+      QNNTestEnvironment::GetInstance().dump_json()) {
+    output_dir = QNNTestEnvironment::GetInstance().CreateTestcaseDirs();
+  }
   // Add kMSDomain to cover contrib op like Gelu
   const std::unordered_map<std::string, int> domain_to_version = {{"", opset_version}, {kMSDomain, 1}};
 
   auto& logging_manager = DefaultLoggingManager();
   logging_manager.SetDefaultLoggerSeverity(log_severity);
+  if (QNNTestEnvironment::GetInstance().verbose()) {
+    logging_manager.RemoveSink(logging::SinkType::EtwSink);
+    logging_manager.SetDefaultLoggerSeverity(logging::Severity::kVERBOSE);
+  }
 
   // Create float model and serialize it to a string.
   onnxruntime::Model f32_model("f32_model", false, ModelMetaData(), PathString(),
@@ -511,6 +882,12 @@ inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
   f32_helper.SetGraphOutputs();
   ASSERT_STATUS_OK(f32_model.MainGraph().Resolve());
   f32_model.ToProto().SerializeToString(&f32_model_data);
+
+  if (QNNTestEnvironment::GetInstance().dump_onnx()) {
+    auto dump_path = output_dir / ToPathString("dumped_f32_model.onnx");
+    LOGS(logging_manager.DefaultLogger(), VERBOSE) << "Save onnx float32 model at: " << dump_path;
+    ASSERT_STATUS_OK(onnxruntime::Model::Save(f32_model, dump_path));
+  }
 
   // Run f32 model on CPU EP and collect outputs.
   std::vector<OrtValue> cpu_f32_outputs;
@@ -548,8 +925,27 @@ inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
   ASSERT_STATUS_OK(f16_model.MainGraph().Resolve());
   f16_model.ToProto().SerializeToString(&f16_model_data);
 
+  if (QNNTestEnvironment::GetInstance().dump_onnx()) {
+    auto dump_path = output_dir / ToPathString("dumped_f16_model.onnx");
+    LOGS(logging_manager.DefaultLogger(), VERBOSE) << "Save onnx float16 model at: " << dump_path;
+    ASSERT_STATUS_OK(onnxruntime::Model::Save(f16_model, dump_path));
+  }
+
   bool is_qnn_ep = true;
   TryEnableQNNSaver(qnn_options);
+  if (QNNTestEnvironment::GetInstance().dump_dlc()) {
+    qnn_options["dump_qnn_ir_dlc"] = "1";
+    qnn_options["dump_qnn_ir_dlc_dir"] = output_dir.string();
+#if defined(_WIN32)
+    qnn_options["qnn_ir_backend_path"] = "QnnIr.dll";
+#else
+    qnn_options["qnn_ir_backend_path"] = "libQnnIr.so";
+#endif  // defined(_WIN32)
+  }
+  if (QNNTestEnvironment::GetInstance().dump_json()) {
+    qnn_options["dump_json_qnn_graph"] = "1";
+    qnn_options["json_qnn_graph_dir"] = output_dir.string();
+  }
   std::vector<OrtValue> qnn_f16_outputs;
   if (!qnn_ctx_model_path.empty()) {
     onnx::ModelProto model_proto;
@@ -609,8 +1005,9 @@ inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
         const float cpu_f16_val = cpu_f16_vals[j].ToFloat();  // f16@CPU_EP val
 
         // Get errors of f16@CPU_EP and f16@QNN_EP against f32@CPU_EP.
-        const float cpu_relative_err = std::fabs(expected_val - cpu_f16_val) / expected_val;
-        const float qnn_relative_err = std::fabs(expected_val - qnn_f16_val) / expected_val;
+        constexpr float epsilon = 1e-16f;
+        const float cpu_relative_err = std::fabs(expected_val - cpu_f16_val) / (expected_val + epsilon);
+        const float qnn_relative_err = std::fabs(expected_val - qnn_f16_val) / (expected_val + epsilon);
 
         // Also compare the FP16 values against each other.
         // This is equivalent to abs(f16@QNN_EP - f16@CPU_EP) / output_range
@@ -654,10 +1051,12 @@ inline void TestFp16ModelAccuracy(const GetTestModelFn& f32_model_fn,
  *
  * \param builder Model builder object used to build the model's inputs, outputs, and nodes.
  * \param input_def Input definition that describes what kind of input to create.
+ * \param allocator Optional allocator to use to allocate the input ORT value.
  * \return A pointer to the new input.
  */
 template <typename T>
-inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<T>& input_def) {
+inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<T>& input_def,
+                              AllocatorPtr allocator = nullptr) {
   NodeArg* input = nullptr;
   const auto& shape = input_def.GetShape();
   const bool is_initializer = input_def.IsInitializer();
@@ -668,7 +1067,7 @@ inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<T>& 
     if (is_initializer) {
       input = builder.MakeInitializer<T>(shape, raw_data);
     } else {
-      input = builder.MakeInput<T>(shape, raw_data);
+      input = builder.MakeInput<T>(shape, raw_data, allocator);
     }
   } else {  // Random data
     const auto& rand_info = input_def.GetRandomDataInfo();
@@ -676,7 +1075,7 @@ inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<T>& 
     if (is_initializer) {
       input = builder.MakeInitializer<T>(shape, rand_info.min, rand_info.max);
     } else {
-      input = builder.MakeInput<T>(shape, rand_info.min, rand_info.max);
+      input = builder.MakeInput<T>(shape, rand_info.min, rand_info.max, allocator);
     }
   }
 
@@ -684,7 +1083,8 @@ inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<T>& 
 }
 
 template <>
-inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<bool>& input_def) {
+inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<bool>& input_def,
+                              AllocatorPtr allocator) {
   NodeArg* input = nullptr;
   const auto& shape = input_def.GetShape();
   const bool is_initializer = input_def.IsInitializer();
@@ -695,22 +1095,23 @@ inline NodeArg* MakeTestInput(ModelTestBuilder& builder, const TestInputDef<bool
     if (is_initializer) {
       input = builder.MakeInitializerBool(shape, raw_data);
     } else {
-      input = builder.MakeInput<bool>(shape, raw_data);
+      input = builder.MakeInput<bool>(shape, raw_data, allocator);
     }
   } else {  // Random data
     if (is_initializer) {
       input = builder.MakeRandInitializerBool(shape);
     } else {
-      input = builder.MakeInputBool(shape);
+      input = builder.MakeInputBool(shape, allocator);
     }
   }
 
   return input;
 }
 
-// ONNX spec does not allow quantizing float to int32. However, this function will create an int32 input (divide by scale)
-// and then return the output of DequantizeLinear. Note that bias_scale should be generally be equal
-// to input_scale * weights_scale. See quantization tool: onnx_quantizer.py::quantize_bias_static()
+// ONNX spec does not allow quantizing float to int32. However, this function will create an int32
+// input (divide by scale) and then return the output of DequantizeLinear. Note that bias_scale should
+// be generally be equal to input_scale * weights_scale.
+// See quantization tool: onnx_quantizer.py::quantize_bias_static()
 //
 // i.e., initial bias => manual quantization (int32) => DQ => final float bias
 NodeArg* MakeTestQDQBiasInput(ModelTestBuilder& builder, const TestInputDef<float>& bias_def, float bias_scale,
@@ -725,6 +1126,7 @@ NodeArg* MakeTestQDQBiasInput(ModelTestBuilder& builder, const TestInputDef<floa
  * \param input_defs_2 List of input definitions of type InputType2.
  * \param attrs List of operator attributes.
  * \param op_domain The operator's domain. Defaults to the ONNX domain (i.e., "").
+ * \param input_allocator Optional allocator to use to allocate input ORT values.
  * \returns A model building function.
  */
 template <typename InputType1, typename InputType2 = int64_t>
@@ -732,18 +1134,55 @@ inline GetTestModelFn BuildOpTestCase(const std::string& op_type,
                                       const std::vector<TestInputDef<InputType1>>& input_defs_1,
                                       const std::vector<TestInputDef<InputType2>>& input_defs_2,
                                       const std::vector<ONNX_NAMESPACE::AttributeProto>& attrs,
-                                      const std::string& op_domain = kOnnxDomain) {
-  return [op_type, input_defs_1, input_defs_2, attrs, op_domain](ModelTestBuilder& builder) {
+                                      const std::string& op_domain = kOnnxDomain,
+                                      AllocatorPtr input_allocator = nullptr) {
+  return [op_type, input_defs_1, input_defs_2, attrs, op_domain, input_allocator](ModelTestBuilder& builder) {
     std::vector<NodeArg*> op_inputs;
     op_inputs.reserve(input_defs_1.size() + input_defs_2.size());
 
     for (const auto& input_def : input_defs_1) {
-      NodeArg* input = MakeTestInput<InputType1>(builder, input_def);
+      NodeArg* input = MakeTestInput<InputType1>(builder, input_def, input_allocator);
       op_inputs.push_back(input);
     }
 
     for (const auto& input_def : input_defs_2) {
-      NodeArg* input = MakeTestInput<InputType2>(builder, input_def);
+      NodeArg* input = MakeTestInput<InputType2>(builder, input_def, input_allocator);
+      op_inputs.push_back(input);
+    }
+
+    auto* output = builder.MakeOutput();
+    Node& onnx_node = builder.AddNode(op_type, op_inputs, {output}, op_domain);
+
+    for (const auto& attr : attrs) {
+      onnx_node.AddAttributeProto(attr);
+    }
+  };
+}
+
+template <typename InputType1, typename InputType2 = int64_t>
+inline GetTestModelFn BuildOpTestCase(const std::string& op_type,
+                                      const std::vector<TestInputDef<InputType1>>& input_defs_1,
+                                      const std::vector<TestInputDef<InputType2>>& input_defs_2,
+                                      const std::vector<TestInputDef<InputType1>>& input_defs_3,
+                                      const std::vector<ONNX_NAMESPACE::AttributeProto>& attrs,
+                                      const std::string& op_domain = kOnnxDomain,
+                                      AllocatorPtr input_allocator = nullptr) {
+  return [op_type, input_defs_1, input_defs_2, input_defs_3, attrs, op_domain, input_allocator](ModelTestBuilder& builder) {
+    std::vector<NodeArg*> op_inputs;
+    op_inputs.reserve(input_defs_1.size() + input_defs_2.size() + input_defs_3.size());
+
+    for (const auto& input_def : input_defs_1) {
+      NodeArg* input = MakeTestInput<InputType1>(builder, input_def, input_allocator);
+      op_inputs.push_back(input);
+    }
+
+    for (const auto& input_def : input_defs_2) {
+      NodeArg* input = MakeTestInput<InputType2>(builder, input_def, input_allocator);
+      op_inputs.push_back(input);
+    }
+
+    for (const auto& input_def : input_defs_3) {
+      NodeArg* input = MakeTestInput<InputType1>(builder, input_def, input_allocator);
       op_inputs.push_back(input);
     }
 
@@ -764,23 +1203,28 @@ inline GetTestModelFn BuildOpTestCase(const std::string& op_type,
  * \param input_defs List of input definitions.
  * \param attrs List of operator attributes.
  * \param op_domain The operator's domain. Defaults to the ONNX domain (i.e., "").
+ * \param use_contrib_qdq Whether to use Q/DQ ops from the MS domain instead of the ONNX domain.
+ * \param input_allocator Optional allocator to use to allocate input ORT values.
  * \returns A model building function.
  */
 template <typename QuantType, typename OtherInputType = int64_t>
-inline GetTestQDQModelFn<QuantType> BuildQDQOpTestCase(const std::string& op_type,
-                                                       const std::vector<TestInputDef<float>>& quant_input_defs,
-                                                       const std::vector<TestInputDef<OtherInputType>>& non_quant_input_defs,
-                                                       const std::vector<ONNX_NAMESPACE::AttributeProto>& attrs,
-                                                       const std::string& op_domain = kOnnxDomain,
-                                                       bool use_contrib_qdq = false) {
+inline GetTestQDQModelFn<QuantType> BuildQDQOpTestCase(
+    const std::string& op_type,
+    const std::vector<TestInputDef<float>>& quant_input_defs,
+    const std::vector<TestInputDef<OtherInputType>>& non_quant_input_defs,
+    const std::vector<ONNX_NAMESPACE::AttributeProto>& attrs,
+    const std::string& op_domain = kOnnxDomain,
+    bool use_contrib_qdq = false,
+    AllocatorPtr input_allocator = nullptr) {
   return [op_type, quant_input_defs, non_quant_input_defs, attrs, op_domain,
-          use_contrib_qdq](ModelTestBuilder& builder, std::vector<QuantParams<QuantType>>& output_qparams) {
+          use_contrib_qdq, input_allocator](
+             ModelTestBuilder& builder, std::vector<QuantParams<QuantType>>& output_qparams) {
     std::vector<NodeArg*> op_inputs;
     op_inputs.reserve(quant_input_defs.size() + non_quant_input_defs.size());
 
     // Create QDQ inputs
     for (const auto& input_def : quant_input_defs) {
-      NodeArg* input = MakeTestInput<float>(builder, input_def);
+      NodeArg* input = MakeTestInput<float>(builder, input_def, input_allocator);
       QuantParams<QuantType> input_qparams = GetTestInputQuantParams<QuantType>(input_def);
       NodeArg* input_after_qdq = AddQDQNodePair<QuantType>(builder, input, input_qparams.scale,
                                                            input_qparams.zero_point, use_contrib_qdq);
@@ -789,7 +1233,7 @@ inline GetTestQDQModelFn<QuantType> BuildQDQOpTestCase(const std::string& op_typ
 
     // Create non-QDQ inputs
     for (const auto& input_def : non_quant_input_defs) {
-      NodeArg* input = MakeTestInput<OtherInputType>(builder, input_def);
+      NodeArg* input = MakeTestInput<OtherInputType>(builder, input_def, input_allocator);
       op_inputs.push_back(input);
     }
 
@@ -806,23 +1250,96 @@ inline GetTestQDQModelFn<QuantType> BuildQDQOpTestCase(const std::string& op_typ
                                                      output_qparams[0].zero_point, use_contrib_qdq);
   };
 }
+template <typename QuantType, typename OtherInputType = int64_t>
+inline GetTestQDQModelFn<QuantType> BuildQDQOpTestCase(
+    const std::string& op_type,
+    const std::vector<TestInputDef<float>>& quant_input_defs,
+    const std::vector<TestInputDef<OtherInputType>>& non_quant_input_defs,
+    const std::vector<TestInputDef<float>>& quant_input_defs_2,
+    const std::vector<ONNX_NAMESPACE::AttributeProto>& attrs,
+    const std::string& op_domain = kOnnxDomain,
+    bool use_contrib_qdq = false,
+    AllocatorPtr input_allocator = nullptr) {
+  return [op_type, quant_input_defs, non_quant_input_defs, quant_input_defs_2, attrs, op_domain,
+          use_contrib_qdq, input_allocator](
+             ModelTestBuilder& builder, std::vector<QuantParams<QuantType>>& output_qparams) {
+    std::vector<NodeArg*> op_inputs;
+    op_inputs.reserve(quant_input_defs.size() + non_quant_input_defs.size() + quant_input_defs_2.size());
 
+    // Create QDQ inputs
+    for (const auto& input_def : quant_input_defs) {
+      NodeArg* input = MakeTestInput<float>(builder, input_def, input_allocator);
+      QuantParams<QuantType> input_qparams = GetTestInputQuantParams<QuantType>(input_def);
+      NodeArg* input_after_qdq = AddQDQNodePair<QuantType>(builder, input, input_qparams.scale,
+                                                           input_qparams.zero_point, use_contrib_qdq);
+      op_inputs.push_back(input_after_qdq);
+    }
+
+    // Create non-QDQ inputs
+    for (const auto& input_def : non_quant_input_defs) {
+      NodeArg* input = MakeTestInput<OtherInputType>(builder, input_def, input_allocator);
+      op_inputs.push_back(input);
+    }
+
+    // Create QDQ inputs
+    for (const auto& input_def : quant_input_defs_2) {
+      NodeArg* input = MakeTestInput<float>(builder, input_def, input_allocator);
+      QuantParams<QuantType> input_qparams = GetTestInputQuantParams<QuantType>(input_def);
+      NodeArg* input_after_qdq = AddQDQNodePair<QuantType>(builder, input, input_qparams.scale,
+                                                           input_qparams.zero_point, use_contrib_qdq);
+      op_inputs.push_back(input_after_qdq);
+    }
+
+    // Op -> op_output
+    auto* op_output = builder.MakeIntermediate();
+    Node& onnx_node = builder.AddNode(op_type, op_inputs, {op_output}, op_domain);
+
+    for (const auto& attr : attrs) {
+      onnx_node.AddAttributeProto(attr);
+    }
+
+    // op_output -> Q -> DQ -> output
+    AddQDQNodePairWithOutputAsGraphOutput<QuantType>(builder, op_output, output_qparams[0].scale,
+                                                     output_qparams[0].zero_point, use_contrib_qdq);
+  };
+}
 /**
  * Runs a test model on the QNN EP. Checks the graph node assignment, and that inference
  * outputs for QNN and CPU match.
  *
- * \param build_test_case Function that builds a test model. See test/optimizer/qdq_test_utils.h
+ * \param build_test_case Function that builds a test model. See test/unittest_util/qdq_test_utils.h
  * \param provider_options Provider options for QNN EP.
  * \param opset_version The opset version.
  * \param expected_ep_assignment How many nodes are expected to be assigned to QNN (All, Some, or None).
  * \param fp32_abs_err The acceptable error between CPU EP and QNN EP.
  * \param log_severity The logger's minimum severity level.
+ * \param verify_outputs True to verify that the outputs match (within tolerance).
+ * \param ep_graph_checker Function called on the Graph generated for the EP's session. Used to check node
+ *                         EP assignment.
  */
 void RunQnnModelTest(const GetTestModelFn& build_test_case, ProviderOptions provider_options,
                      int opset_version, ExpectedEPNodeAssignment expected_ep_assignment,
                      float fp32_abs_err = 1e-5f,
                      logging::Severity log_severity = logging::Severity::kERROR,
-                     bool verify_outputs = true);
+                     bool verify_outputs = true,
+                     std::function<void(const Graph&)>* ep_graph_checker = nullptr);
+
+/**
+ * Runs a test model on the QNN HTP backend and verifies node assignment to QNN EP without comparing outputs to ORT CPU.
+ * This is useful for operations like RandomUniformLike where outputs are expected to be different between runs.
+ *
+ * \param build_test_case Function that builds a test model.
+ * \param provider_options Provider options for QNN EP.
+ * \param opset_version The opset version.
+ * \param expected_ep_assignment How many nodes are expected to be assigned to QNN (All, Some, or None).
+ * \param log_severity The logger's minimum severity level.
+ * \param ep_graph_checker Function called on the Graph generated for the EP's session. Used to check node
+ *                         EP assignment.
+ */
+void RunQnnModelTestHTPNoVerify(const GetTestModelFn& build_test_case, ProviderOptions provider_options,
+                                int opset_version, ExpectedEPNodeAssignment expected_ep_assignment,
+                                logging::Severity log_severity = logging::Severity::kERROR,
+                                std::function<void(const Graph&)>* ep_graph_checker = nullptr);
 
 enum class BackendSupport {
   SUPPORT_UNKNOWN,
@@ -835,10 +1352,75 @@ enum class BackendSupport {
 // The test is skipped if HTP is unavailable (may occur on Windows ARM64).
 // TODO: Remove once HTP can be emulated on Windows ARM64.
 class QnnHTPBackendTests : public ::testing::Test {
+  // Platform capability attributes queried from QNN.
+  struct QnnPlatformAttributes {
+    QnnHtpDevice_Arch_t htp_arch{QNN_HTP_DEVICE_ARCH_NONE};
+    bool dlbc_supported{false};
+    uint32_t vtcm_size_mb{0};
+    uint32_t soc_model{QNN_SOC_MODEL_UNKNOWN};
+    std::string sdk_version;
+  };
+
+ protected:
+  // Runs before each test
+  void SetUp() override;
+
+  // Some tests need the Ir backend, which is not always available.
+  [[nodiscard]] BackendSupport IsIRBackendSupported() const;
+
+ public:
+  // Returns true if platform attributes are available.
+  static bool HasPlatformAttributes() {
+    return cached_platform_attrs_.has_value();
+  }
+
+  // Cached platform attributes for HTP backend to avoid repeated queries.
+  static const QnnPlatformAttributes& GetPlatformAttributes() {
+    if (!cached_platform_attrs_.has_value()) {
+      ORT_THROW("QNN platform attributes are not available.");
+    }
+    return *cached_platform_attrs_;
+  }
+
+  // Returns true if the test should be skipped because HTP architecture is less than or equal to the provided arch.
+  // Example: if (QnnHTPBackendTests::ShouldSkipIfHTPArchIsLessThanOrEqualTo(QNN_HTP_DEVICE_ARCH_V68)) { GTEST_SKIP() << "..."; }
+  static bool ShouldSkipIfHtpArchIsLessThanOrEqualTo(QnnHtpDevice_Arch_t arch) {
+    return HasPlatformAttributes() && GetPlatformAttributes().htp_arch <= arch;
+  }
+
+  // Query QNN platform attributes by directly calling QNN APIs
+  Status QueryQnnPlatformAttributesDirectly(QnnPlatformAttributes& out, const onnxruntime::logging::Logger& logger);
+
+  // Returns true if the test should be skipped because HTP FP16 is not supported on this platform.
+  static bool ShouldSkipIfHtpFp16Unsupported() {
+#if defined(_WIN32)  // On Windows ARM64, FP16 is not supported if the HTP architecture is v68.
+    return ShouldSkipIfHtpArchIsLessThanOrEqualTo(QNN_HTP_DEVICE_ARCH_V68);
+#else
+    return false;
+#endif
+  }
+
+  // Returns true if the test should be skipped because AutoEP is not supported on this platform.
+  static bool ShouldSkipIfAutoEpNpuUnsupported() {
+#if defined(_WIN32)  // V68 device (Makena) on win-arm64 doesn't support NPU device discovery with dxcore.dll.
+    return ShouldSkipIfHtpArchIsLessThanOrEqualTo(QNN_HTP_DEVICE_ARCH_V68);
+#else
+    return false;
+#endif
+  }
+
+  static std::optional<QnnHTPBackendTests::QnnPlatformAttributes> cached_platform_attrs_;  // Set by the first test using this fixture.
+  static BackendSupport cached_htp_support_;                                               // Set by the first test using this fixture.
+  static BackendSupport cached_ir_support_;
+};
+
+// Testing fixture class for tests that require the QNN GPU backend. Checks if QNN GPU is available before the test
+// begins. The test is skipped if the GPU backend is unavailable (may occur on Windows ARM64).
+class QnnGPUBackendTests : public ::testing::Test {
  protected:
   void SetUp() override;
 
-  static BackendSupport cached_htp_support_;  // Set by the first test using this fixture.
+  static BackendSupport cached_gpu_support_;  // Set by the first test using this fixture.
 };
 
 // Testing fixture class for tests that require the QNN CPU backend. Checks if QNN CPU is available before the test
@@ -851,6 +1433,15 @@ class QnnCPUBackendTests : public ::testing::Test {
   static BackendSupport cached_cpu_support_;  // Set by the first test using this fixture.
 };
 
+// Testing fixture class for tests that require the QNN Ir backend. Checks if QNN IR is available before the test
+// begins. The test is skipped if the IR backend is unavailable (may occur with certain QNN versions).
+class QnnIRBackendTests : public ::testing::Test {
+ protected:
+  void SetUp() override;
+
+  static BackendSupport cached_ir_support_;  // Set by the first test using this fixture.
+};
+
 /**
  * Returns true if the given reduce operator type (e.g., "ReduceSum") and opset version (e.g., 13)
  * supports "axes" as an input (instead of an attribute).
@@ -861,6 +1452,20 @@ class QnnCPUBackendTests : public ::testing::Test {
  * \return True if "axes" is an input, or false if "axes" is an attribute.
  */
 bool ReduceOpHasAxesInput(const std::string& op_type, int opset_version);
+
+#define QNN_SKIP_TEST_IF_HTP_FP16_UNSUPPORTED()                                  \
+  do {                                                                           \
+    if (QnnHTPBackendTests::ShouldSkipIfHtpFp16Unsupported()) {                  \
+      GTEST_SKIP() << "Test requires HTP FP16 support, which is not available."; \
+    }                                                                            \
+  } while (0)
+
+#define QNN_SKIP_TEST_IF_AUTOEP_NPU_UNSUPPORTED()                                                            \
+  do {                                                                                                       \
+    if (QnnHTPBackendTests::ShouldSkipIfAutoEpNpuUnsupported()) {                                            \
+      GTEST_SKIP() << "This platform lacks dxcore.dll NPU discovery capability required by auto-EP feature"; \
+    }                                                                                                        \
+  } while (0)
 
 }  // namespace test
 }  // namespace onnxruntime

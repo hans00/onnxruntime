@@ -431,7 +431,7 @@ bool DnnlMatMulIntegerNodeCapability::IsDimensionSupported(const Node* node, con
     }
   }
 
-  // if shape nullptr, not enough information to reject it. attempt to run it (no gaurantee)
+  // if shape nullptr, not enough information to reject it. attempt to run it (no guarantee)
   if (node_inputs[0]->Shape() == nullptr || node_inputs[1]->Shape() == nullptr) {
     return true;
   }
@@ -465,7 +465,7 @@ bool DnnlSumNodeCapability::Supported(const Node* node, const GraphViewer& graph
 }
 
 // OneDNN version of Sum does not support Numpy style broadcasting.
-// If the dimentions of all inputs do not match return false
+// If the dimensions of all inputs do not match return false
 bool DnnlSumNodeCapability::IsDimensionSupported(const Node* node) const {
   auto node_inputs = node->InputDefs();
   // find first non-null shape
@@ -615,7 +615,7 @@ bool DnnlReshapeNodeCapability::Supported(const Node* node, const GraphViewer& g
 }
 bool DnnlReshapeNodeCapability::IsDimensionSupported(const Node* node) const {
   auto node_inputs = node->InputDefs();
-  // We can not reshape a one dimentional tensor to a scalar output
+  // We can not reshape a one dimensional tensor to a scalar output
   if (node_inputs[1]->Shape() != nullptr &&
       node_inputs[1]->Shape()->dim_size() == 1 &&
       node_inputs[1]->Shape()->dim(0).dim_value() == 0) {
@@ -672,30 +672,35 @@ bool DnnlErfNodeCapability::Supported(const Node* node, const GraphViewer& graph
   return true;
 }
 
-bool DnnlErfNodeCapability::IsInitilizedWithExpectedValue(const GraphViewer& graph_viewer, const NodeArg* node_arg, float expected_value) const {
-  // TypeAsProto()->tensor_type().elem_type()
-  if ((ORT_DataType)node_arg->TypeAsProto()->tensor_type().elem_type() == type_float32) {
-    const ONNX_NAMESPACE::TensorProto* tensor_proto = nullptr;
-    graph_viewer.GetInitializedTensor(node_arg->Name(), tensor_proto);
-    const float* val = reinterpret_cast<const float*>(tensor_proto->raw_data().data());
-
-    // Check for NaN and Inf
-    if (std::isnan(val[0]) || std::isinf(val[0])) {
-      if (std::isinf(val[0]) && std::isinf(expected_value) && (std::signbit(val[0]) == std::signbit(expected_value))) {
-        return true;
-      }
-      return false;
-    }
-
-    const float atol = 1e-8f;
-    const float rtol = 1e-5f;
-    float diff = std::abs(val[0] - expected_value);
-    if (diff > (atol + rtol * std::abs(expected_value))) {
-      return false;
-    }
-    return true;
+bool DnnlErfNodeCapability::IsInitilizedWithExpectedValue(const GraphViewer& graph_viewer, const NodeArg* node_arg,
+                                                          float expected_value) const {
+  const ONNX_NAMESPACE::TensorProto* tensor_proto = nullptr;
+  if (!graph_viewer.GetInitializedTensor(node_arg->Name(), tensor_proto)) {
+    return false;
   }
-  return false;
+
+  onnxruntime::Initializer erf_weight{graph_viewer.GetGraph(), *tensor_proto, graph_viewer.ModelPath()};
+  if (erf_weight.data_type() != ONNX_NAMESPACE::TensorProto_DataType_FLOAT) {
+    return false;
+  }
+
+  const float* val = erf_weight.data<float>();
+
+  // Check for NaN and Inf
+  if (std::isnan(val[0]) || std::isinf(val[0])) {
+    if (std::isinf(val[0]) && std::isinf(expected_value) && (std::signbit(val[0]) == std::signbit(expected_value))) {
+      return true;
+    }
+    return false;
+  }
+
+  const float atol = 1e-8f;
+  const float rtol = 1e-5f;
+  float diff = std::abs(val[0] - expected_value);
+  if (diff > (atol + rtol * std::abs(expected_value))) {
+    return false;
+  }
+  return true;
 }
 
 const Node* DnnlErfNodeCapability::FirstParentByType(const Node& node, const std::string& parent_type) const {

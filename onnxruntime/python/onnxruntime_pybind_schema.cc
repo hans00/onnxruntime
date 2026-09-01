@@ -1,8 +1,13 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
+// SPDX-FileCopyrightText: Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
 // Licensed under the MIT License.
 
 #include "python/onnxruntime_pybind_state_common.h"
 #include "core/framework/kernel_registry.h"
+#if !defined(ORT_MINIMAL_BUILD)
+#include "core/session/utils.h"
+#include "core/session/abi_devices.h"
+#endif
 #include <pybind11/stl.h>
 
 namespace py = pybind11;
@@ -15,7 +20,7 @@ void addGlobalSchemaFunctions(pybind11::module& m) {
       "get_all_operator_schema", []() -> const std::vector<ONNX_NAMESPACE::OpSchema> {
         return ONNX_NAMESPACE::OpSchemaRegistry::get_all_schemas_with_history();
       },
-      "Return a vector of OpSchema all registed operators");
+      "Return a vector of OpSchema all registered operators");
   m.def(
       "get_all_opkernel_def", []() -> const std::vector<onnxruntime::KernelDef> {
         std::vector<onnxruntime::KernelDef> result;
@@ -28,23 +33,21 @@ void addGlobalSchemaFunctions(pybind11::module& m) {
               return CudaProviderFactoryCreator::Create(&provider_options);
             }(),
 #endif
-#ifdef USE_ROCM
-            []() {
-              OrtROCMProviderOptions provider_options;
-              return onnxruntime::RocmProviderFactoryCreator::Create(&provider_options);
-            }(),
-#endif
 #ifdef USE_DNNL
             onnxruntime::DnnlProviderFactoryCreator::Create(1),
 #endif
 #ifdef USE_OPENVINO
             []() {
               ProviderOptions provider_options_map;
-              return onnxruntime::OpenVINOProviderFactoryCreator::Create(&provider_options_map);
+              SessionOptions session_options;
+              return onnxruntime::OpenVINOProviderFactoryCreator::Create(&provider_options_map, &session_options);
             }(),
 #endif
 #ifdef USE_TENSORRT
             onnxruntime::TensorrtProviderFactoryCreator::Create(0),
+#endif
+#ifdef USE_NV
+            onnxruntime::NvProviderFactoryCreator::Create(0),
 #endif
 #ifdef USE_MIGRAPHX
             onnxruntime::MIGraphXProviderFactoryCreator::Create(0),
@@ -53,22 +56,25 @@ void addGlobalSchemaFunctions(pybind11::module& m) {
             onnxruntime::VitisAIProviderFactoryCreator::Create(ProviderOptions{}),
 #endif
 #ifdef USE_ACL
-            onnxruntime::ACLProviderFactoryCreator::Create(0),
-#endif
-#ifdef USE_ARMNN
-            onnxruntime::ArmNNProviderFactoryCreator::Create(0),
+            onnxruntime::ACLProviderFactoryCreator::Create(false),
 #endif
 #ifdef USE_DML
-            onnxruntime::DMLProviderFactoryCreator::Create(0, false, false, false),
+            []() {
+              ConfigOptions config_options{};
+              return onnxruntime::DMLProviderFactoryCreator::Create(config_options, 0, false, false, false);
+            }(),
 #endif
 #ifdef USE_NNAPI
             onnxruntime::NnapiProviderFactoryCreator::Create(0, std::optional<std::string>()),
+#endif
+#ifdef USE_VSINPU
+            onnxruntime::VSINPUProviderFactoryCreator::Create(),
 #endif
 #ifdef USE_RKNPU
             onnxruntime::RknpuProviderFactoryCreator::Create(),
 #endif
 #ifdef USE_COREML
-            onnxruntime::CoreMLProviderFactoryCreator::Create(0),
+            onnxruntime::CoreMLProviderFactoryCreator::Create(ProviderOptions{}),
 #endif
 #ifdef USE_XNNPACK
             onnxruntime::XnnpackProviderFactoryCreator::Create(ProviderOptions{}, nullptr),
@@ -91,6 +97,58 @@ void addGlobalSchemaFunctions(pybind11::module& m) {
         return result;
       },
       "Return a vector of KernelDef for all registered OpKernels");
+
+#if !defined(ORT_MINIMAL_BUILD)
+  m.def(
+      "get_registered_ep_kernel_defs",
+      [](const std::string& ep_name) -> std::vector<onnxruntime::KernelDef> {
+        std::vector<onnxruntime::KernelDef> result;
+        auto& env = GetEnv();
+
+        // Collect all OrtEpDevice pointers matching the requested EP name.
+        std::vector<const OrtEpDevice*> selected_devices;
+        for (const OrtEpDevice* device : env.GetOrtEpDevices()) {
+          if (device && device->ep_name == ep_name) {
+            selected_devices.push_back(device);
+            break;  // one device is sufficient to create the factory and query kernels
+          }
+        }
+
+        if (selected_devices.empty()) {
+          throw std::runtime_error(
+              "No devices found for EP '" + ep_name +
+              "'. Ensure the plugin EP library is registered via register_execution_provider_library().");
+        }
+
+        // Create a factory for the plugin EP.
+        std::unique_ptr<IExecutionProviderFactory> factory;
+        auto status = CreateIExecutionProviderFactoryForEpDevices(env, selected_devices, factory);
+        if (!status.IsOK()) {
+          throw std::runtime_error("Failed to create EP factory for '" + ep_name + "': " + status.ToString());
+        }
+
+        // Create an EP instance with default session options.
+        OrtSessionOptions ort_session_options{};
+        const auto& logger = *env.GetLoggingManager()->DefaultLogger().ToExternal();
+        auto provider = factory->CreateProvider(ort_session_options, logger);
+        if (!provider) {
+          throw std::runtime_error("Failed to create EP instance for '" + ep_name + "'.");
+        }
+
+        // Extract kernel defs from the EP's kernel registry.
+        auto kernel_registry = provider->GetKernelRegistry();
+        if (kernel_registry) {
+          for (const auto& entry : kernel_registry->GetKernelCreateMap()) {
+            result.emplace_back(*(entry.second.kernel_def));
+          }
+        }
+
+        return result;
+      },
+      py::arg("ep_name"),
+      "Return a vector of KernelDef for a dynamically registered plugin EP.\n"
+      "The EP must be loaded first via register_execution_provider_library().");
+#endif
 }
 
 void addOpKernelSubmodule(py::module& m) {

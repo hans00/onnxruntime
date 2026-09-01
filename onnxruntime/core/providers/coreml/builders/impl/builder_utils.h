@@ -7,7 +7,7 @@
 
 #include <optional>
 
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 #include "core/common/status.h"
 #include "core/graph/basic_types.h"
 #include "core/providers/common.h"
@@ -36,10 +36,15 @@ Status HandleAutoPad(const std::vector<int64_t> input_shape,
 //
 
 // Copy an onnx initializer data to a coreml weight
-Status CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, const ONNX_NAMESPACE::TensorProto& tensor);
+Status CreateCoreMLWeight(CoreML::Specification::WeightParams& weight,
+                          const ONNX_NAMESPACE::TensorProto& tensor,
+                          const ModelBuilder& model_builder);
 
 // Copy the float array to a coreml weight
 void CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, gsl::span<const float> data);
+
+// Copy the MLFloat16 array to a coreml weight
+void CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, gsl::span<const MLFloat16> data);
 
 // Copy the int32_t array to a coreml weight
 void CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, gsl::span<const int32_t> data);
@@ -47,7 +52,6 @@ void CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, gsl::span<c
 // Copy the int64_t array to a coreml weight
 void CreateCoreMLWeight(CoreML::Specification::WeightParams& weight, gsl::span<const int64_t> data);
 
-#if defined(COREML_ENABLE_MLPROGRAM)
 //
 // MLProgram utils
 //
@@ -96,6 +100,7 @@ COREML_SPEC::MILSpec::DataType DataTypeToMILSpec() {
 
 // The TensorProto.data_type field is an int, but must be a valid TensorProto_DataType value.
 // Use int for the arg so the caller can pass TensorProto.data_type() value and do the cast to enum internally
+// This method also automatically converts int64 to int32 since only int32 is supported for CoreML operations.
 COREML_SPEC::MILSpec::DataType OnnxDataTypeToMILSpec(int onnx_type);
 
 /// <summary>
@@ -114,8 +119,10 @@ template <typename T>
 COREML_SPEC::MILSpec::Value CreateScalarTensorValue(const T& data);
 
 /// <summary>Create a NamedValueType from an ONNX tensor NodeArg.</summary>
+/// <param name="node_arg">NodeArg to create NamedValueType from.</param>
+/// <param name="convert_scalar">If true, scalar shapes are converted to 1D.</param>
 /// <remarks>Used to create inputs for the 'main' function in an ML Program.</remarks>
-COREML_SPEC::MILSpec::NamedValueType CreateNamedTensorValueType(const NodeArg& node_arg);
+COREML_SPEC::MILSpec::NamedValueType CreateNamedTensorValueType(const NodeArg& node_arg, bool convert_scalar = false);
 
 /// <summary>
 /// Add an input argument to a MILSpec::Operation
@@ -126,6 +133,26 @@ COREML_SPEC::MILSpec::NamedValueType CreateNamedTensorValueType(const NodeArg& n
 /// <see>"https://apple.github.io/coremltools/source/coremltools.converters.mil.mil.ops.defs.html"</see>
 void AddOperationInput(COREML_SPEC::MILSpec::Operation& op,
                        std::string_view input_name, std::string_view value_name);
+
+/// <summary>
+/// Add a variadic input argument to a MILSpec::Operation
+/// </summary>
+/// <param name="op">Operation to update.</param>
+/// <param name="input name">The input name defined by the spec for the operation. </param>
+/// <param name="value_names">The input value names.</param>
+void AddOperationVariadicInput(COREML_SPEC::MILSpec::Operation& op, std::string_view input_name,
+                               const std::vector<std::string_view>& value_names);
+
+/// Add an output to a MILSpec::Operation for an intermediate operation when the implementation is composed of
+/// multiple MLProgram operations. In this case we don't have a NodeArg for the output.
+/// </summary>
+/// <param name="op">Operation to update.</param>
+/// <param name="output_name">Name of the intermediate output. Create using ModelBuilder::GetUniqueName.</param>
+/// <param name="element_type">onnx::TensorProto_DataType element type of the output.
+///   int32_t as that is what TensorShapeProto uses to store the value.</param>
+/// <param name="shape">Shape of the output if known.</param>
+void AddIntermediateOperationOutput(COREML_SPEC::MILSpec::Operation& op, std::string_view output_name,
+                                    int32_t element_type, std::optional<gsl::span<const int64_t>> shape);
 
 /// <summary>
 /// Add an output to a MILSpec::Operation. Name, data type and shape are used from the NodeArg.
@@ -144,6 +171,5 @@ void AddOperationOutput(COREML_SPEC::MILSpec::Operation& op, const NodeArg& outp
 /// <param name="num_spatial_dims">Number of spatial dims in input. Generally rank - 2 (ignore N and C dims).</param>
 void AddPadTypeAndPads(COREML_SPEC::MILSpec::Operation& op, ModelBuilder& model_builder, std::string_view op_type,
                        const NodeAttrHelper& helper, int num_spatial_dims);
-#endif  // defined(COREML_ENABLE_MLPROGRAM)
 }  // namespace coreml
 }  // namespace onnxruntime

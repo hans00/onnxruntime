@@ -9,17 +9,13 @@
 // The functions are typically implemented in
 // onnxruntime/core/providers/<provider name>/<provider name>_provider_factory.cc.
 //
-// For execution providers that are built as separate libraries (CUDA, TensorRT, ROCm, MIGraphX, DNNL, OpenVINO)
+// For execution providers that are built as separate libraries (CUDA, TensorRT, MIGraphX, DNNL, OpenVINO)
 // the functions are implemented in provider_bridge_ort.cc.
 
 #include "core/providers/cpu/cpu_provider_factory_creator.h"
 
 #if defined(USE_ACL)
 #include "core/providers/acl/acl_provider_factory_creator.h"
-#endif
-
-#if defined(USE_ARMNN)
-#include "core/providers/armnn/armnn_provider_factory_creator.h"
 #endif
 
 #if defined(USE_COREML)
@@ -38,7 +34,7 @@
 #include "core/providers/dnnl/dnnl_provider_factory_creator.h"
 #endif
 
-#if defined(USE_MIGRAPHX)
+#if defined(USE_MIGRAPHX) || defined(USE_MIGRAPHX_PROVIDER_INTERFACE)
 #include "core/providers/migraphx/migraphx_provider_factory_creator.h"
 #endif
 
@@ -46,11 +42,15 @@
 #include "core/providers/nnapi/nnapi_provider_factory_creator.h"
 #endif
 
+#if defined(USE_VSINPU)
+#include "core/providers/vsinpu/vsinpu_provider_factory_creator.h"
+#endif
+
 #if defined(USE_JSEP)
 #include "core/providers/js/js_provider_factory_creator.h"
 #endif
 
-#if defined(USE_OPENVINO)
+#if defined(USE_OPENVINO) || defined(USE_OPENVINO_PROVIDER_INTERFACE)
 #include "core/providers/openvino/openvino_provider_factory_creator.h"
 #endif
 
@@ -58,11 +58,7 @@
 #include "core/providers/rknpu/rknpu_provider_factory_creator.h"
 #endif
 
-#if defined(USE_ROCM)
-#include "core/providers/rocm/rocm_provider_factory_creator.h"
-#endif
-
-#if defined(USE_QNN)
+#if defined(USE_QNN) || defined(USE_QNN_PROVIDER_INTERFACE)
 #include "core/providers/qnn/qnn_provider_factory_creator.h"
 #endif
 
@@ -70,15 +66,15 @@
 #include "core/providers/snpe/snpe_provider_factory_creator.h"
 #endif
 
-#if defined(USE_TENSORRT)
+#if defined(USE_TENSORRT) || defined(USE_TENSORRT_PROVIDER_INTERFACE)
 #include "core/providers/tensorrt/tensorrt_provider_factory_creator.h"
 #endif
 
-#if defined(USE_TVM)
-#include "core/providers/tvm/tvm_provider_factory_creator.h"
+#if defined(USE_NV) || defined(USE_NV_PROVIDER_INTERFACE)
+#include "core/providers/nv_tensorrt_rtx/nv_provider_factory_creator.h"
 #endif
 
-#if defined(USE_VITISAI)
+#if defined(USE_VITISAI) || defined(USE_VITISAI_PROVIDER_INTERFACE)
 #include "core/providers/vitisai/vitisai_provider_factory_creator.h"
 #endif
 
@@ -88,6 +84,10 @@
 
 #if defined(USE_WEBNN)
 #include "core/providers/webnn/webnn_provider_factory_creator.h"
+#endif
+
+#if defined(USE_WEBGPU)
+#include "core/providers/webgpu/webgpu_provider_factory_creator.h"
 #endif
 
 #if defined(USE_CANN)

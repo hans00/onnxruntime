@@ -54,7 +54,7 @@ def train(args, model, device, optimizer, loss_fn, train_loader, epoch):
         probability = model(data)
 
         if args.view_graphs:
-            import torchviz
+            import torchviz  # noqa: PLC0415
 
             pytorch_backward_graph = torchviz.make_dot(probability, params=dict(list(model.named_parameters())))
             pytorch_backward_graph.view()
@@ -219,7 +219,7 @@ def main():
         }
         log_level = log_level_mapping.get(args.log_level.upper(), None)
         if not isinstance(log_level, LogLevel):
-            raise ValueError("Invalid log level: %s" % args.log_level)
+            raise ValueError(f"Invalid log level: {args.log_level}")
         debug_options = DebugOptions(log_level=log_level, save_onnx=args.export_onnx_graphs, onnx_prefix="MNIST")
 
         model = ORTModule(model, debug_options)

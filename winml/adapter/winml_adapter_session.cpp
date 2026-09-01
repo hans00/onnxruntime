@@ -131,11 +131,12 @@ ORT_API_STATUS_IMPL(winmla::SessionInitialize, _In_ OrtSession* session) {
   API_IMPL_END
 }
 
-ORT_API_STATUS_IMPL(winmla::SessionLoadAndPurloinModel, _In_ OrtSession* session, _In_ OrtModel* model) {
+ORT_API_STATUS_IMPL(winmla::SessionLoadAndPurloinModel, _In_ OrtSession* session, _In_ OrtModel* in) {
   API_IMPL_BEGIN
   auto inference_session = reinterpret_cast<::onnxruntime::InferenceSession*>(session);
   auto session_protected_load_accessor = static_cast<InferenceSessionProtectedLoadAccessor*>(inference_session);
 
+  OrtModelImpl* model = in->ToInternal();
   auto status = session_protected_load_accessor->Load(model->DetachModelProto());
 
   ReleaseModel(model);
@@ -310,7 +311,7 @@ ORT_API_STATUS_IMPL(
   winrt::Windows::Foundation::Collections::IMap<winrt::hstring, uint32_t> override_map =
     winrt::single_threaded_map<winrt::hstring, uint32_t>();
   for (auto freeDimOverride : session_options.free_dimension_overrides) {
-    if (freeDimOverride.dim_identifer_type == onnxruntime::FreeDimensionOverrideType::Name) {
+    if (freeDimOverride.dim_identifier_type == onnxruntime::FreeDimensionOverrideType::Name) {
       override_map.Insert(
         winrt::to_hstring(freeDimOverride.dim_identifier), static_cast<uint32_t>(freeDimOverride.dim_value)
       );

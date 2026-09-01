@@ -196,8 +196,9 @@ void TensorToVideoFrameConverter::DX12TensorToVideoFrame(
         UINT comPtrSize = static_cast<UINT>(sizeof(spSharedD3D11Texture.GetAddressOf()));
         UINT handleSize = static_cast<UINT>(sizeof(sharedHandle));
 
-        if ((FAILED(spVideoFrameTexture->GetPrivateData(
-                 _d3d11TextureGUID, &comPtrSize, spSharedD3D11Texture.GetAddressOf())) ||
+        if ((FAILED(
+               spVideoFrameTexture->GetPrivateData(_d3d11TextureGUID, &comPtrSize, spSharedD3D11Texture.GetAddressOf())
+             ) ||
              !spSharedD3D11Texture.Get()) ||
             (FAILED(spVideoFrameTexture->GetPrivateData(_handleGUID, &handleSize, &sharedHandle)) ||
              sharedHandle != shared_handle_)) {
@@ -266,9 +267,7 @@ void TensorToVideoFrameConverter::ConvertDX12TensorToUnsupportedVideoFrameFormat
 
   // Find the first supported format and convert to it
   auto supportedFormatIter = std::find_if(
-    _winmli::supportedWinMLFormats.begin(),
-    _winmli::supportedWinMLFormats.end(),
-    [&device_cache](DXGI_FORMAT format) {
+    _winmli::supportedWinMLFormats.begin(), _winmli::supportedWinMLFormats.end(), [&device_cache](DXGI_FORMAT format) {
       return _winmli::FormatSupportedForUAV(device_cache.GetD3D12Device(), format);
     }
   );
@@ -365,7 +364,8 @@ void TensorToVideoFrameConverter::SoftwareTensorToVideoFrame(
   wgdx::Direct3D11::IDirect3DSurface spOutputSurface = pDestVideoFrame.Direct3DSurface();
 
   // only one of softwarebitmap or direct3Dsurface should be non-null
-  if ((spOutputSoftwareBitmap == nullptr && spOutputSurface == nullptr) || (spOutputSoftwareBitmap != nullptr && spOutputSurface != nullptr)) {
+  if ((spOutputSoftwareBitmap == nullptr && spOutputSurface == nullptr) ||
+      (spOutputSoftwareBitmap != nullptr && spOutputSurface != nullptr)) {
     WINML_THROW_HR(E_INVALIDARG);
   }
   if (spOutputSoftwareBitmap) {
@@ -381,7 +381,10 @@ void TensorToVideoFrameConverter::SoftwareTensorToVideoFrame(
   if (_winmli::NeedsVideoFrameConversion(
         pDestVideoFrame, {}, {0, 0, (UINT32)tensorWidth, (UINT32)tensorHeight}, tensorWidth, tensorHeight
       )) {
-    if (converted_video_frame_ == nullptr || _winmli::NeedsVideoFrameConversion(converted_video_frame_, {}, {0, 0, (UINT32)tensorWidth, (UINT32)tensorHeight}, tensorWidth, tensorHeight)) {
+    if (converted_video_frame_ == nullptr ||
+        _winmli::NeedsVideoFrameConversion(
+          converted_video_frame_, {}, {0, 0, (UINT32)tensorWidth, (UINT32)tensorHeight}, tensorWidth, tensorHeight
+        )) {
       converted_video_frame_ = wm::VideoFrame::CreateWithSoftwareBitmap(
         wgi::SoftwareBitmap(wgi::BitmapPixelFormat::Bgra8, tensorWidth, tensorHeight)
       );
@@ -598,31 +601,39 @@ void TensorToVideoFrameConverter::ConvertGPUTensorToDX12Texture(
 
     command_list_->ResourceBarrier(
       1,
-      unmove_ptr(CD3DX12_RESOURCE_BARRIER::Transition(
-        pInputResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
-      ))
+      unmove_ptr(
+        CD3DX12_RESOURCE_BARRIER::Transition(
+          pInputResource, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE
+        )
+      )
     );
     command_list_->Dispatch(dispatchWidth, dispatchHeight, 1);
     command_list_->ResourceBarrier(
       1,
-      unmove_ptr(CD3DX12_RESOURCE_BARRIER::Transition(
-        pInputResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-      ))
+      unmove_ptr(
+        CD3DX12_RESOURCE_BARRIER::Transition(
+          pInputResource, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        )
+      )
     );
 
     // Copy the UAV data to the output resource after detensorization
     command_list_->ResourceBarrier(
       1,
-      unmove_ptr(CD3DX12_RESOURCE_BARRIER::Transition(
-        UAV_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE
-      ))
+      unmove_ptr(
+        CD3DX12_RESOURCE_BARRIER::Transition(
+          UAV_resource_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE
+        )
+      )
     );
     command_list_->CopyResource(pOutputResource, UAV_resource_.Get());
     command_list_->ResourceBarrier(
       1,
-      unmove_ptr(CD3DX12_RESOURCE_BARRIER::Transition(
-        UAV_resource_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS
-      ))
+      unmove_ptr(
+        CD3DX12_RESOURCE_BARRIER::Transition(
+          UAV_resource_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS
+        )
+      )
     );
 
     WINML_THROW_IF_FAILED(command_list_->Close());
@@ -873,26 +884,30 @@ void TensorToVideoFrameConverter::ConvertCPUTensorToSoftwareBitmap(
   ImageTensorChannelType targetChannelType = _winmli::GetChannelTypeFromSoftwareBitmap(softwareBitmap);
 
   if (tensorDesc.dataType == kImageTensorDataTypeFloat32) {
-    WINML_THROW_IF_FAILED(CpuDetensorizer::Detensorize<float>(
-      tensorDesc.channelType,
-      targetChannelType,
-      tensorDesc.pixelRange,
-      static_cast<float*>(pCPUTensor),
-      bufferWidth,
-      height,
-      width,
-      pData
-    ));
+    WINML_THROW_IF_FAILED(
+      CpuDetensorizer::Detensorize<float>(
+        tensorDesc.channelType,
+        targetChannelType,
+        tensorDesc.pixelRange,
+        static_cast<float*>(pCPUTensor),
+        bufferWidth,
+        height,
+        width,
+        pData
+      )
+    );
   } else if (tensorDesc.dataType == kImageTensorDataTypeFloat16) {
-    WINML_THROW_IF_FAILED(CpuDetensorizer::Detensorize<DirectX::PackedVector::HALF>(
-      tensorDesc.channelType,
-      targetChannelType,
-      tensorDesc.pixelRange,
-      static_cast<DirectX::PackedVector::HALF*>(pCPUTensor),
-      bufferWidth,
-      height,
-      width,
-      pData
-    ));
+    WINML_THROW_IF_FAILED(
+      CpuDetensorizer::Detensorize<DirectX::PackedVector::HALF>(
+        tensorDesc.channelType,
+        targetChannelType,
+        tensorDesc.pixelRange,
+        static_cast<DirectX::PackedVector::HALF*>(pCPUTensor),
+        bufferWidth,
+        height,
+        width,
+        pData
+      )
+    );
   }
 }

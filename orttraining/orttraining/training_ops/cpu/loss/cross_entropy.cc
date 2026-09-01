@@ -7,7 +7,7 @@
 #include "core/providers/common.h"
 #include <unsupported/Eigen/SpecialFunctions>
 #include "core/providers/cpu/math/matmul_helper.h"
-#include "core/common/gsl.h"
+#include <gsl/gsl>
 
 namespace onnxruntime {
 namespace contrib {
@@ -190,6 +190,13 @@ Status SparseSoftmaxCrossEntropy<T>::Compute(OpKernelContext* context) const {
   const int64_t* label_data = label.template Data<int64_t>();
   float* loss_data = loss->template MutableData<float>();
   float* log_prob_data = log_prob->template MutableData<float>();
+
+  // Validate label values are within [0, d) to prevent out-of-bounds reads.
+  for (ptrdiff_t i = 0; i < n; i++) {
+    ORT_RETURN_IF(label_data[i] < 0 || label_data[i] >= d,
+                  "SparseSoftmaxCrossEntropy: label value ", label_data[i],
+                  " at index ", i, " is out of range [0, ", d, ")");
+  }
 
   // computation begins here
   std::vector<float> shifted_logit(nd);
